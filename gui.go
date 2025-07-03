@@ -47,11 +47,6 @@ func NewChatGUI(chatName string, messages []Message, model string, reader *bufio
 	}
 }
 
-// UpdateChatHistory updates the chat history display with proper formatting
-func (g *ChatGUI) UpdateChatHistory() {
-	// This will be handled by the Bubble Tea model
-}
-
 // generateTitleWithAPI generates a title using the AI API
 func (g *ChatGUI) generateTitleWithAPI() {
 	if len(g.messages) == 0 {
