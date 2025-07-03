@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -312,6 +313,37 @@ func getSpinnerChar(index int) string {
 	return spinnerChars[index%len(spinnerChars)]
 }
 
+// wrapText wraps text to the specified width
+func wrapText(text string, width int) string {
+	if width <= 0 {
+		return text
+	}
+
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		return text
+	}
+
+	var lines []string
+	currentLine := words[0]
+
+	for i := 1; i < len(words); i++ {
+		word := words[i]
+		if len(currentLine)+1+len(word) <= width {
+			currentLine += " " + word
+		} else {
+			lines = append(lines, currentLine)
+			currentLine = word
+		}
+	}
+
+	if currentLine != "" {
+		lines = append(lines, currentLine)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
 // ChatModel represents the Bubble Tea model for the chat interface
 type ChatModel struct {
 	chatName    string
@@ -413,15 +445,8 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					// Scroll up one message when not typing
 					m.scrollPos = max(0, m.scrollPos-1)
 					m.autoScroll = false
-				} else {
-					// Normal character input
-					if len(msg.String()) == 1 {
-						char := msg.String()[0]
-						if char >= 32 && char <= 126 {
-							m.inputBuffer += msg.String()
-						}
-					}
 				}
+				// Don't add to input buffer when scrolling
 			}
 		case "down":
 			if !m.loading {
@@ -430,15 +455,21 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					maxScroll := max(0, len(m.getVisibleMessages())-(m.height-6))
 					m.scrollPos = min(maxScroll, m.scrollPos+1)
 					m.autoScroll = false
-				} else {
-					// Normal character input
-					if len(msg.String()) == 1 {
-						char := msg.String()[0]
-						if char >= 32 && char <= 126 {
-							m.inputBuffer += msg.String()
-						}
-					}
 				}
+				// Don't add to input buffer when scrolling
+			}
+		case "ctrl+up":
+			if !m.loading {
+				// Scroll up one message
+				m.scrollPos = max(0, m.scrollPos-1)
+				m.autoScroll = false
+			}
+		case "ctrl+down":
+			if !m.loading {
+				// Scroll down one message
+				maxScroll := max(0, len(m.getVisibleMessages())-(m.height-6))
+				m.scrollPos = min(maxScroll, m.scrollPos+1)
+				m.autoScroll = false
 			}
 		default:
 			if !m.loading && len(msg.String()) == 1 {
@@ -540,28 +571,77 @@ func (m ChatModel) View() string {
 		statusText = loadingStyle.Render(getSpinnerChar(m.spinner) + " " + m.status)
 	}
 
-	// Add scroll help if there are many messages
+	// Add comprehensive control hints
+	controlHints := []string{}
+
+	// Always show basic controls
+	controlHints = append(controlHints, "Ctrl+S to stop", "Ctrl+C to quit")
+
+	// Add scroll controls if there are many messages
 	if len(m.getVisibleMessages()) > chatBoxHeight {
-		statusText += " | PageUp/Down, Home/End, ↑↓ to scroll"
+		controlHints = append(controlHints, "PageUp/Down, Home/End, Ctrl+↑↓, ↑↓ to scroll")
+	}
+
+	// Add vim commands hint
+	controlHints = append(controlHints, ":g to generate title, :f to favorite, :q to quit")
+
+	if len(controlHints) > 0 {
+		statusText += " | " + strings.Join(controlHints, ", ")
 	}
 	status := statusStyle.Render(statusText)
 
-	// Prepare chat history content
+	// Prepare chat history content with enhanced scrolling
 	var visible []string
 	visibleMessages := m.getVisibleMessages()
 
-	// Apply scroll position
+	// Apply scroll position with bounds checking
 	startIdx := m.scrollPos
-	endIdx := min(startIdx+(m.height-6), len(visibleMessages))
+	if startIdx < 0 {
+		startIdx = 0
+		m.scrollPos = 0
+	}
+
+	maxScroll := max(0, len(visibleMessages)-chatBoxHeight)
+	if startIdx > maxScroll {
+		startIdx = maxScroll
+		m.scrollPos = maxScroll
+	}
+
+	endIdx := min(startIdx+chatBoxHeight, len(visibleMessages))
 
 	if startIdx < len(visibleMessages) {
 		for i := startIdx; i < endIdx; i++ {
 			msg := visibleMessages[i]
+			var messageText string
+
+			// Parse markdown and word wrap long messages
+			parsedContent := parseMarkdown(msg.Content)
+			wrappedContent := wrapText(parsedContent, m.width-15)
+			lines := strings.Split(wrappedContent, "\n")
+
 			if msg.Role == "user" {
-				visible = append(visible, userStyle.Render("You:")+msg.Content)
+				if len(lines) > 0 {
+					messageText = userStyle.Render("You:") + " " + lines[0]
+					// Add continuation lines for wrapped text
+					for j := 1; j < len(lines); j++ {
+						messageText += "\n" + strings.Repeat(" ", 4) + lines[j]
+					}
+				} else {
+					messageText = userStyle.Render("You:") + " " + parsedContent
+				}
 			} else if msg.Role == "assistant" {
-				visible = append(visible, assistantStyle.Render("Assistant:")+msg.Content)
+				if len(lines) > 0 {
+					messageText = assistantStyle.Render("Assistant:") + " " + lines[0]
+					// Add continuation lines for wrapped text
+					for j := 1; j < len(lines); j++ {
+						messageText += "\n" + strings.Repeat(" ", 11) + lines[j] // "Assistant: " is 11 chars
+					}
+				} else {
+					messageText = assistantStyle.Render("Assistant:") + " " + parsedContent
+				}
 			}
+
+			visible = append(visible, messageText)
 		}
 	}
 
@@ -574,7 +654,26 @@ func (m ChatModel) View() string {
 		visible = append(padLines, visible...)
 	}
 
-	chatContent := strings.Join(visible, "\n\n")
+	// Add scroll indicators at top and bottom
+	scrollIndicatorTop := ""
+	scrollIndicatorBottom := ""
+
+	if len(visibleMessages) > chatBoxHeight {
+		if m.scrollPos > 0 {
+			scrollIndicatorTop = "↑ More messages above ↑\n"
+		}
+		if m.scrollPos < len(visibleMessages)-chatBoxHeight {
+			scrollIndicatorBottom = "\n↓ More messages below ↓"
+		}
+	}
+
+	// Join messages with proper spacing
+	messageContent := strings.Join(visible, "\n\n")
+	if messageContent == "" {
+		messageContent = "No messages yet..."
+	}
+
+	chatContent := scrollIndicatorTop + messageContent + scrollIndicatorBottom
 	if strings.TrimSpace(chatContent) == "" {
 		chatContent = "No messages yet..."
 	}
@@ -585,7 +684,9 @@ func (m ChatModel) View() string {
 	// Input area - always 3 lines tall at bottom
 	inputText := "Input: " + m.inputBuffer
 	if m.loading {
-		inputText += " " + getSpinnerChar(m.spinner) + " waiting for response..."
+		inputText += " " + getSpinnerChar(m.spinner) + " waiting for response... (ctrl + s to stop and edit message)"
+	} else if m.inputBuffer == "" {
+		inputText += " waiting for input..."
 	}
 
 	// Pad input text to fill 3 lines
@@ -699,6 +800,8 @@ func (m MenuModel) View() string {
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
 	selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
 	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
 	var options strings.Builder
 	options.WriteString(titleStyle.Render(m.title) + "\n\n")
 	for i, option := range m.options {
@@ -708,7 +811,9 @@ func (m MenuModel) View() string {
 			options.WriteString(normalStyle.Render("  "+option) + "\n")
 		}
 	}
-	help := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("\nUse ↑↓ to navigate, Enter to select, Esc to go back")
+
+	// Enhanced help text with more detailed controls
+	help := helpStyle.Render("\nControls: ↑↓ to navigate, Enter to select, Esc to go back, Ctrl+C to quit")
 	return options.String() + help
 }
 
@@ -2000,6 +2105,31 @@ func (m apiKeyMenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// Custom View function for apiKeyMenuModel with enhanced help text
+func (m apiKeyMenuModel) View() string {
+	if m.quitting {
+		return ""
+	}
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63"))
+	selectedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
+	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
+	var options strings.Builder
+	options.WriteString(titleStyle.Render(m.title) + "\n\n")
+	for i, option := range m.options {
+		if i == m.selected {
+			options.WriteString(selectedStyle.Render("> "+option) + "\n")
+		} else {
+			options.WriteString(normalStyle.Render("  "+option) + "\n")
+		}
+	}
+
+	// Enhanced help text with 's' key hint for showing API keys
+	help := helpStyle.Render("\nControls: ↑↓ to navigate, Enter to select, S to show key, Esc to go back, Ctrl+C to quit")
+	return options.String() + help
+}
+
 // getVisibleMessages returns the list of visible messages (excluding system messages)
 func (m ChatModel) getVisibleMessages() []Message {
 	var visible []Message
@@ -2062,4 +2192,168 @@ func (m *ChatModel) handleVimCommand(cmd string) bool {
 	default:
 		return false
 	}
+}
+
+// parseMarkdown parses markdown content and returns styled text
+func parseMarkdown(content string) string {
+	if content == "" {
+		return content
+	}
+
+	// Split content into lines for processing
+	lines := strings.Split(content, "\n")
+	var result []string
+
+	for _, line := range lines {
+		styledLine := line
+
+		// Headers (h1-h6)
+		if strings.HasPrefix(line, "# ") {
+			styledLine = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63")).Render(strings.TrimPrefix(line, "# "))
+		} else if strings.HasPrefix(line, "## ") {
+			styledLine = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Render(strings.TrimPrefix(line, "## "))
+		} else if strings.HasPrefix(line, "### ") {
+			styledLine = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("203")).Render(strings.TrimPrefix(line, "### "))
+		} else if strings.HasPrefix(line, "#### ") {
+			styledLine = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("214")).Render(strings.TrimPrefix(line, "#### "))
+		} else if strings.HasPrefix(line, "##### ") {
+			styledLine = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("142")).Render(strings.TrimPrefix(line, "##### "))
+		} else if strings.HasPrefix(line, "###### ") {
+			styledLine = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("240")).Render(strings.TrimPrefix(line, "###### "))
+		} else {
+			// Bold text (**text** or __text__)
+			styledLine = parseBoldText(styledLine)
+
+			// Italic text (*text* or _text_)
+			styledLine = parseItalicText(styledLine)
+
+			// Code blocks (```code```)
+			styledLine = parseCodeBlocks(styledLine)
+
+			// Inline code (`code`)
+			styledLine = parseInlineCode(styledLine)
+
+			// Links [text](url)
+			styledLine = parseLinks(styledLine)
+
+			// Lists
+			styledLine = parseLists(styledLine)
+		}
+
+		result = append(result, styledLine)
+	}
+
+	return strings.Join(result, "\n")
+}
+
+// parseBoldText handles **bold** and __bold__ text
+func parseBoldText(text string) string {
+	// Handle **bold** text
+	text = regexp.MustCompile(`\*\*(.*?)\*\*`).ReplaceAllStringFunc(text, func(match string) string {
+		content := match[2 : len(match)-2] // Remove **
+		return lipgloss.NewStyle().Bold(true).Render(content)
+	})
+
+	// Handle __bold__ text
+	text = regexp.MustCompile(`__(.*?)__`).ReplaceAllStringFunc(text, func(match string) string {
+		content := match[2 : len(match)-2] // Remove __
+		return lipgloss.NewStyle().Bold(true).Render(content)
+	})
+
+	return text
+}
+
+// parseItalicText handles *italic* and _italic_ text
+func parseItalicText(text string) string {
+	// Handle *italic* text
+	text = regexp.MustCompile(`\*(.*?)\*`).ReplaceAllStringFunc(text, func(match string) string {
+		content := match[1 : len(match)-1] // Remove *
+		return lipgloss.NewStyle().Italic(true).Render(content)
+	})
+
+	// Handle _italic_ text
+	text = regexp.MustCompile(`_(.*?)_`).ReplaceAllStringFunc(text, func(match string) string {
+		content := match[1 : len(match)-1] // Remove _
+		return lipgloss.NewStyle().Italic(true).Render(content)
+	})
+
+	return text
+}
+
+// parseCodeBlocks handles ```code``` blocks
+func parseCodeBlocks(text string) string {
+	return regexp.MustCompile("```(.*?)```").ReplaceAllStringFunc(text, func(match string) string {
+		// Extract content between ```
+		start := strings.Index(match, "```")
+		end := strings.LastIndex(match, "```")
+		if start != -1 && end != -1 && end > start {
+			content := match[start+3 : end]
+			return lipgloss.NewStyle().
+				Background(lipgloss.Color("236")).
+				Foreground(lipgloss.Color("252")).
+				Padding(0, 1).
+				Render(content)
+		}
+		return match
+	})
+}
+
+// parseInlineCode handles `code` inline code
+func parseInlineCode(text string) string {
+	return regexp.MustCompile("`([^`]+)`").ReplaceAllStringFunc(text, func(match string) string {
+		// Extract content between backticks
+		content := match[1 : len(match)-1] // Remove backticks
+		return lipgloss.NewStyle().
+			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("252")).
+			Padding(0, 1).
+			Render(content)
+	})
+}
+
+// parseLinks handles [text](url) links
+func parseLinks(text string) string {
+	return regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`).ReplaceAllStringFunc(text, func(match string) string {
+		// Extract link text and URL
+		re := regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+		matches := re.FindStringSubmatch(match)
+		if len(matches) >= 3 {
+			linkText := matches[1]
+			url := matches[2]
+			return lipgloss.NewStyle().
+				Foreground(lipgloss.Color("39")).
+				Underline(true).
+				Render(linkText + " (" + url + ")")
+		}
+		return match
+	})
+}
+
+// parseLists handles markdown lists
+func parseLists(text string) string {
+	// Handle numbered lists (1. item)
+	text = regexp.MustCompile(`^(\d+\.\s+)(.*)$`).ReplaceAllStringFunc(text, func(match string) string {
+		re := regexp.MustCompile(`^(\d+\.\s+)(.*)$`)
+		matches := re.FindStringSubmatch(match)
+		if len(matches) >= 3 {
+			number := matches[1]
+			content := matches[2]
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("214")).Render(number) + content
+		}
+		return match
+	})
+
+	// Handle bullet lists (- item, * item, + item)
+	text = regexp.MustCompile(`^([-*+]\s+)(.*)$`).ReplaceAllStringFunc(text, func(match string) string {
+		re := regexp.MustCompile(`^([-*+]\s+)(.*)$`)
+		matches := re.FindStringSubmatch(match)
+		if len(matches) >= 3 {
+			bullet := matches[1]
+			content := matches[2]
+			return lipgloss.NewStyle().Foreground(lipgloss.Color("142")).Render(bullet) + content
+		}
+		return match
+	})
+
+	return text
 }

@@ -3,6 +3,7 @@
 *.exe~
 build/
 dist/
+aichat.exe
 
 # Sensitive user data
 .util/
@@ -13,6 +14,7 @@ openrouterkey.txt
 # User-specific files
 test.ps1
 build-script.ps1
+response.html
 
 # IDE and editor files
 .vscode/
@@ -36,3 +38,8 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Go specific
+*.test
+*.out
+go.work
