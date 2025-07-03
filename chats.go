@@ -13,8 +13,9 @@ import (
 
 // Message represents a chat message
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role          string `json:"role"`
+	Content       string `json:"content"`
+	MessageNumber int    `json:"message_number"`
 }
 
 // ChatMetadata stores additional information about the chat
@@ -113,10 +114,30 @@ func loadChatWithMetadata(name string) (*ChatFile, error) {
 		// Try loading legacy format (just messages array)
 		var messages []Message
 		if err2 := json.Unmarshal(data, &messages); err2 != nil {
-			return nil, fmt.Errorf("failed to unmarshal chat file '%s': %w", name, err)
+			if serr, ok := err2.(*json.SyntaxError); ok {
+				// Find line number from offset
+				lineNum := 1
+				for _, b := range data[:serr.Offset] {
+					if b == '\n' {
+						lineNum++
+					}
+				}
+				return nil, fmt.Errorf("failed to unmarshal chat file '%s': %v (line %d)", name, err2, lineNum)
+			}
+			return nil, fmt.Errorf("failed to unmarshal chat file '%s': %w", name, err2)
 		}
 		chatFile.Messages = messages
 	}
+
+	// After loading messages from JSON, for each message, replace all occurrences of '\n' with '\n' (actual newline) in msg.Content.
+	for i := range chatFile.Messages {
+		chatFile.Messages[i].Content = strings.ReplaceAll(chatFile.Messages[i].Content, "\\n", "\n")
+		// Assign message number if missing or zero (except for system message at index 0)
+		if chatFile.Messages[i].MessageNumber == 0 && i != 0 {
+			chatFile.Messages[i].MessageNumber = i
+		}
+	}
+
 	return &chatFile, nil
 }
 
@@ -455,7 +476,7 @@ func runChat(chatName string, messages []Message, reader *bufio.Reader, model st
 			continue
 		}
 
-		messages = append(messages, Message{Role: "user", Content: userInput})
+		messages = append(messages, Message{Role: "user", Content: userInput, MessageNumber: len(messages)})
 		chatFile.Messages = messages
 
 		reply, err := streamChatResponse(messages, model)
@@ -469,7 +490,7 @@ func runChat(chatName string, messages []Message, reader *bufio.Reader, model st
 			continue
 		}
 
-		messages = append(messages, Message{Role: "assistant", Content: reply})
+		messages = append(messages, Message{Role: "assistant", Content: reply, MessageNumber: len(messages)})
 		chatFile.Messages = messages
 
 		// Auto-save without regenerating summary
@@ -596,4 +617,15 @@ func promptModelSelection(reader *bufio.Reader, models []string, defaultModel st
 	}
 
 	return models[choice-1], nil
+}
+
+// Helper to filter out system messages
+func filterNonSystemMessages(messages []Message) []Message {
+	var filtered []Message
+	for _, msg := range messages {
+		if msg.Role != "system" {
+			filtered = append(filtered, msg)
+		}
+	}
+	return filtered
 }
