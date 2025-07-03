@@ -1,0 +1,38 @@
+# Build artifacts
+*.exe
+*.exe~
+build/
+dist/
+
+# Sensitive user data
+.util/
+.api_key
+openrouterkey.txt
+*.key
+
+# User-specific files
+test.ps1
+build-script.ps1
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp 
