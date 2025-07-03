@@ -143,6 +143,7 @@ If you encounter any issues or have questions:
 1. Check the [Issues](https://github.com/aculd/go-ai-cli/issues) page
 2. Create a new issue with detailed information
 3. Include your operating system and Go version
+4. Please note this project was entirely vibe-coded 😎
 
 ---
 
