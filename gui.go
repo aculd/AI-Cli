@@ -157,6 +157,8 @@ type spinnerTickMsg struct{}
 
 type stopRequestMsg struct{}
 
+type blinkTickMsg struct{}
+
 func getAIResponseCmd(messages []Message, model string, stopChan chan bool) tea.Cmd {
 	return func() tea.Msg {
 		reply, err := streamChatResponseGUI(messages, model, stopChan)
@@ -374,10 +376,15 @@ type ChatModel struct {
 	errorMsg        string    // The error message to display
 	cursorPos       int       // Current cursor position in the input buffer
 	showHelp        bool      // Whether to show the help popup
+	blinkOn         bool      // Whether the cursor is currently visible
+	lastBlink       time.Time // Last time the cursor blinked
 }
 
 func (m ChatModel) Init() tea.Cmd {
-	return nil
+	return tea.Batch(
+		blinkTick(),
+		spinnerTick(),
+	)
 }
 
 func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -402,17 +409,28 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		// Typable key wakeup logic
+		if m.inputBuffer == "" && len(msg.String()) == 1 && msg.Type == tea.KeyRunes && !m.loading {
+			m.inputBuffer = msg.String()
+			m.cursorPos = 1
+			m.blinkOn = true
+			return m, blinkTick()
+		}
+		if len(msg.String()) == 1 && msg.Type == tea.KeyRunes && !m.loading {
+			m.inputBuffer = m.inputBuffer[:m.cursorPos] + msg.String() + m.inputBuffer[m.cursorPos:]
+			m.cursorPos++
+			m.blinkOn = true
+			return m, blinkTick()
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			m.quitting = true
 			return m, tea.Quit
 		case "ctrl+s":
 			if m.loading {
-				// Stop the current request
 				if m.stopChan != nil {
 					close(m.stopChan)
 				}
-				// Remove the last user message
 				if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "user" {
 					m.messages = m.messages[:len(m.messages)-1]
 				}
@@ -425,14 +443,12 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "esc":
 			if m.showConfirm {
-				// User confirmed exit
 				if err := saveChat(m.chatName, m.messages); err == nil {
 					m.status = fmt.Sprintf("Saving %s...", m.chatName)
 				}
 				m.quitting = true
 				return m, tea.Quit
 			} else {
-				// Show exit confirmation
 				m.showConfirm = true
 				return m, nil
 			}
@@ -446,20 +462,16 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "home":
 			if !m.loading && m.inputBuffer == "" {
-				// Scroll to top
 				m.scrollPos = 0
 				m.autoScroll = false
 			} else {
-				// Move cursor to start
 				m.cursorPos = 0
 			}
 		case "end":
 			if !m.loading && m.inputBuffer == "" {
-				// Scroll to bottom
 				m.scrollPos = max(0, len(m.getVisibleMessages())-(m.height-6))
 				m.autoScroll = true
 			} else {
-				// Move cursor to end
 				m.cursorPos = len(m.inputBuffer)
 			}
 		case "backspace":
@@ -487,41 +499,34 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.inputBuffer = ""
 				m.loading = true
 				m.status = "Waiting for AI response..."
-				m.autoScroll = true          // Auto-scroll when sending message
-				m.stopChan = make(chan bool) // Create stop channel
-				// Pass a copy of messages to the command
+				m.autoScroll = true
+				m.stopChan = make(chan bool)
 				messagesCopy := make([]Message, len(m.messages))
 				copy(messagesCopy, m.messages)
 				return m, tea.Batch(getAIResponseCmd(messagesCopy, m.model, m.stopChan), spinnerTick())
 			}
 		case "pageup":
 			if !m.loading {
-				// Scroll up by half the chat box height
 				m.scrollPos = max(0, m.scrollPos-1)
 				m.autoScroll = false
 			}
 		case "pagedown":
 			if !m.loading {
-				// Scroll down by half the chat box height
 				maxScroll := max(0, len(m.getVisibleMessages())-1)
 				m.scrollPos = min(maxScroll, m.scrollPos+1)
 				m.autoScroll = false
 			}
 		case "up":
 			if !m.loading && m.inputBuffer == "" {
-				// Scroll up one message when not typing
 				m.scrollPos = max(0, m.scrollPos-1)
 				m.autoScroll = false
 			}
-			// For multi-line input, move cursor up a line (not implemented)
 		case "down":
 			if !m.loading && m.inputBuffer == "" {
-				// Scroll down one message when not typing
 				maxScroll := max(0, len(m.getVisibleMessages())-(m.height-6))
 				m.scrollPos = min(maxScroll, m.scrollPos+1)
 				m.autoScroll = false
 			}
-			// For multi-line input, move cursor down a line (not implemented)
 		case "shift+up", "pgup":
 			if !m.loading {
 				m.scrollPos = max(0, m.scrollPos-1)
@@ -553,6 +558,10 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spinner = (m.spinner + 1) % 4
 			return m, spinnerTick()
 		}
+	case blinkTickMsg:
+		m.blinkOn = !m.blinkOn
+		m.lastBlink = time.Now()
+		return m, blinkTick()
 	case aiResponseMsg:
 		m.loading = false
 		if m.stopChan != nil {
@@ -565,7 +574,6 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.response == "" {
 				m.status = "Warning: Empty response received"
 			} else {
-				// Only append if we don't already have this exact assistant message
 				shouldAppend := true
 				if len(m.messages) > 0 {
 					lastMsg := m.messages[len(m.messages)-1]
@@ -573,11 +581,9 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						shouldAppend = false
 					}
 				}
-
 				if shouldAppend {
 					m.messages = append(m.messages, Message{Role: "assistant", Content: msg.response})
 					m.status = "Ready"
-					// Auto-scroll to bottom when new message arrives
 					if m.autoScroll {
 						m.scrollPos = max(0, len(m.getVisibleMessages())-(m.height-6))
 					}
@@ -766,28 +772,22 @@ func (m ChatModel) View() string {
 
 	// Input area - always 3 lines tall at bottom
 	inputText := "Input: "
-	if m.cursorPos > len(m.inputBuffer) {
-		m.cursorPos = len(m.inputBuffer)
-	}
-	inputRunes := []rune(m.inputBuffer)
-	cursor := "|"
-	renderedInput := ""
-	for i := 0; i <= len(inputRunes); i++ {
-		if i == m.cursorPos {
-			renderedInput += cursor
+	if m.inputBuffer == "" {
+		inputText = "*waiting for input...*\n\n:h for help"
+	} else {
+		inputRunes := []rune(m.inputBuffer)
+		cursor := "|"
+		renderedInput := ""
+		for i := 0; i <= len(inputRunes); i++ {
+			if i == m.cursorPos && m.blinkOn {
+				renderedInput += cursor
+			}
+			if i < len(inputRunes) {
+				renderedInput += string(inputRunes[i])
+			}
 		}
-		if i < len(inputRunes) {
-			renderedInput += string(inputRunes[i])
-		}
+		inputText += renderedInput
 	}
-	inputText += renderedInput
-	if m.loading {
-		inputText += " " + getSpinnerChar(m.spinner) + " waiting for response... (ctrl + s to stop and edit message)"
-	} else if m.inputBuffer == "" {
-		inputText += " waiting for input..."
-		inputText += "\nType :h for help"
-	}
-
 	// Pad input text to fill 3 lines
 	lines := strings.Split(inputText, "\n")
 	for len(lines) < 3 {
@@ -2570,4 +2570,10 @@ func (m helpModel) View() string {
 func GUIShowHelp() error {
 	_, err := tea.NewProgram(helpModel{}, tea.WithAltScreen()).Run()
 	return err
+}
+
+func blinkTick() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+		return blinkTickMsg{}
+	})
 }
