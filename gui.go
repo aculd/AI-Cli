@@ -947,35 +947,53 @@ func (m MenuModel) View() string {
 		return ""
 	}
 
-	// Generate ASCII art for AI CHAT using go-figure
 	asciiArt := figure.NewFigure("AI CHAT", "", true).String()
+	asciiWidth := lipgloss.Width(strings.Split(asciiArt, "\n")[0])
 
 	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63")).Align(lipgloss.Center)
-	selectedBoxStyle := lipgloss.NewStyle().
+	// Custom selected style: only top and bottom border, no vertical lines
+	customSelected := func(option string) string {
+		// Use golden ratio (0.618) of asciiWidth for the border width
+		borderWidth := int(float64(asciiWidth) * 0.618)
+		if borderWidth < 10 {
+			borderWidth = 10
+		}
+		content := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true).Width(borderWidth).Align(lipgloss.Center).Render(option)
+		borderColor := lipgloss.Color("203")
+		top := lipgloss.NewStyle().Foreground(borderColor).Render("╭" + strings.Repeat("─", borderWidth) + "╮")
+		bottom := lipgloss.NewStyle().Foreground(borderColor).Render("╰" + strings.Repeat("─", borderWidth) + "╯")
+		return top + "\n" + content + "\n" + bottom
+	}
+	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(false)
+	menuBoxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("203")).
-		Foreground(lipgloss.Color("203")).
-		Bold(true).
-		Padding(0, 2).
-		Align(lipgloss.Center)
-	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Align(lipgloss.Center)
-	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Align(lipgloss.Center)
+		BorderForeground(lipgloss.Color("63")).
+		Width(asciiWidth).
+		Align(lipgloss.Center).
+		Padding(1, 4)
+	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Align(lipgloss.Right).Width(asciiWidth)
 
 	var options []string
 	for i, option := range m.options {
+		var rendered string
 		if i == m.selected {
-			options = append(options, selectedBoxStyle.Render(option))
+			rendered = customSelected(option)
 		} else {
-			options = append(options, normalStyle.Render(option))
+			rendered = normalStyle.Render(option)
 		}
+		aligned := lipgloss.PlaceHorizontal(asciiWidth, lipgloss.Right, rendered)
+		options = append(options, aligned)
 	}
+	menuOptions := strings.Join(options, "\n")
 
-	menuContent := titleStyle.Render(m.title) + "\n\n" + strings.Join(options, "\n")
-	help := helpStyle.Render("\nControls: ↑↓ to navigate, Enter to select, Esc to go back, Ctrl+C to quit")
+	menuBox := menuBoxStyle.Render(menuOptions)
+	title := titleStyle.Width(asciiWidth).Render(m.title)
+	help := helpStyle.Render("Controls: ↑↓ to navigate, Enter to select, Esc to go back, Ctrl+C to quit")
 
-	// Compose the full menu with ASCII art
-	fullMenu := asciiArt + "\n" + menuContent + help
+	// Compose the full menu: ASCII art, title, menu box, help text (help directly under box)
+	menuBlock := lipgloss.JoinVertical(lipgloss.Center, asciiArt, title, menuBox, help)
 
+	// Center the menu block in the terminal
 	w := m.width
 	h := m.height
 	if w <= 0 {
@@ -984,8 +1002,8 @@ func (m MenuModel) View() string {
 	if h <= 0 {
 		h = 24
 	}
-	centered := lipgloss.NewStyle().Width(w).Height(h).Align(lipgloss.Center, lipgloss.Center).Render(fullMenu)
-	return centered
+	centeredMenu := lipgloss.NewStyle().Width(w).Height(h).Align(lipgloss.Center, lipgloss.Center).Render(menuBlock)
+	return centeredMenu
 }
 
 type yesNoResultMsg struct{ result bool }
@@ -996,8 +1014,8 @@ func RunGUIMainMenu() error {
 	var width, height int
 	// Start with zero; Bubble Tea will update via WindowSizeMsg
 	width, height = 0, 0
+	mainMenuOptions := []string{"Chats", "Favorites", "Prompts", "Models", "API Key", "Help", "Exit"}
 	for {
-		mainMenuOptions := []string{"Chats", "Favorites", "Prompts", "Models", "API Key", "Help", "Exit"}
 		model := MenuModel{
 			title:    "Main Menu",
 			options:  mainMenuOptions,
@@ -1043,6 +1061,7 @@ func RunGUIMainMenu() error {
 				return err
 			}
 		}
+		// After returning from a submenu, show the main menu again
 	}
 }
 
@@ -1056,13 +1075,481 @@ func (m *ChatModel) handleVimCommand(cmd string) bool {
 	return false
 }
 
-// Minimal stubs for menu handlers to fix build errors
-func GUIMenuChats() error     { return nil }
-func GUIMenuFavorites() error { return nil }
-func GUIMenuPrompts() error   { return nil }
-func GUIMenuModels() error    { return nil }
-func GUIMenuAPIKey() error    { return nil }
-func GUIShowHelp() error      { return nil }
+// --- Submenu implementations ---
+
+// Helper: Simple selection menu for a list of strings, returns index or -1 if cancelled
+func selectFromList(title string, items []string) (int, error) {
+	if len(items) == 0 {
+		return -1, nil
+	}
+	model := MenuModel{
+		title:    title,
+		options:  items,
+		selected: 0,
+		quitting: false,
+		width:    80,
+		height:   24,
+	}
+	p := tea.NewProgram(model, tea.WithAltScreen())
+	finalModel, err := p.Run()
+	if err != nil {
+		return -1, err
+	}
+	menuModel := finalModel.(MenuModel)
+	if menuModel.quitting {
+		return -1, nil
+	}
+	return menuModel.selected, nil
+}
+
+func GUIMenuChats() error {
+	chatMenuOptions := []string{"List Chats", "Add New Chat", "Custom Chat", "Continue Chat", "Back"}
+	for {
+		model := MenuModel{
+			title:    "Chats",
+			options:  chatMenuOptions,
+			selected: 0,
+			quitting: false,
+			width:    80,
+			height:   24,
+		}
+		p := tea.NewProgram(model, tea.WithAltScreen())
+		finalModel, err := p.Run()
+		if err != nil {
+			return err
+		}
+		menuModel := finalModel.(MenuModel)
+		switch menuModel.selected {
+		case 0: // List Chats
+			chats, err := listChats()
+			if err != nil {
+				return err
+			}
+			if len(chats) == 0 {
+				return nil
+			}
+			idx, err := selectFromList("Select Chat to View/Continue", chats)
+			if err != nil || idx < 0 || idx >= len(chats) {
+				continue
+			}
+			chatFile, err := loadChatWithMetadata(chats[idx])
+			if err != nil {
+				return err
+			}
+			reader := bufio.NewReader(os.Stdin)
+			gui := NewChatGUI(chats[idx], chatFile.Messages, chatFile.Metadata.Model, reader)
+			if err := gui.Run(); err != nil {
+				return err
+			}
+		case 1: // Add New Chat
+			reader := bufio.NewReader(os.Stdin)
+			chatName, err := setupNewChat(reader)
+			if err != nil {
+				return err
+			}
+			prompt, err := getDefaultPrompt()
+			if err != nil {
+				return err
+			}
+			messages := []Message{{Role: "system", Content: prompt.Content}}
+			model := DefaultModel()
+			gui := NewChatGUI(chatName, messages, model, reader)
+			if err := gui.Run(); err != nil {
+				return err
+			}
+		case 2: // Custom Chat
+			reader := bufio.NewReader(os.Stdin)
+			if err := customChatFlow(reader); err != nil {
+				return err
+			}
+		case 3: // Continue Chat
+			chats, err := listChats()
+			if err != nil {
+				return err
+			}
+			if len(chats) == 0 {
+				return nil
+			}
+			idx, err := selectFromList("Select Chat to Continue", chats)
+			if err != nil || idx < 0 || idx >= len(chats) {
+				continue
+			}
+			chatFile, err := loadChatWithMetadata(chats[idx])
+			if err != nil {
+				return err
+			}
+			reader := bufio.NewReader(os.Stdin)
+			gui := NewChatGUI(chats[idx], chatFile.Messages, chatFile.Metadata.Model, reader)
+			if err := gui.Run(); err != nil {
+				return err
+			}
+		case 4: // Back
+			return nil
+		}
+	}
+}
+
+func GUIMenuFavorites() error {
+	favMenuOptions := []string{"List Favorites", "Add Favorite", "Remove Favorite", "Back"}
+	for {
+		model := MenuModel{
+			title:    "Favorites",
+			options:  favMenuOptions,
+			selected: 0,
+			quitting: false,
+			width:    80,
+			height:   24,
+		}
+		p := tea.NewProgram(model, tea.WithAltScreen())
+		finalModel, err := p.Run()
+		if err != nil {
+			return err
+		}
+		menuModel := finalModel.(MenuModel)
+		switch menuModel.selected {
+		case 0: // List Favorites
+			// List all favorite chats and allow opening
+			chats, err := listChats()
+			if err != nil {
+				return err
+			}
+			var favorites []string
+			for _, c := range chats {
+				chatFile, err := loadChatWithMetadata(c)
+				if err == nil && chatFile.Metadata.Favorite {
+					favorites = append(favorites, c)
+				}
+			}
+			if len(favorites) == 0 {
+				continue
+			}
+			idx, err := selectFromList("Select Favorite Chat to Open", favorites)
+			if err != nil || idx < 0 || idx >= len(favorites) {
+				continue
+			}
+			chatFile, err := loadChatWithMetadata(favorites[idx])
+			if err != nil {
+				return err
+			}
+			reader := bufio.NewReader(os.Stdin)
+			gui := NewChatGUI(favorites[idx], chatFile.Messages, chatFile.Metadata.Model, reader)
+			if err := gui.Run(); err != nil {
+				return err
+			}
+		case 1: // Add Favorite
+			chats, err := listChats()
+			if err != nil {
+				return err
+			}
+			idx, err := selectFromList("Select Chat to Mark as Favorite", chats)
+			if err != nil || idx < 0 || idx >= len(chats) {
+				continue
+			}
+			if err := toggleChatFavorite(chats[idx]); err != nil {
+				return err
+			}
+		case 2: // Remove Favorite
+			chats, err := listChats()
+			if err != nil {
+				return err
+			}
+			var favorites []string
+			for _, c := range chats {
+				chatFile, err := loadChatWithMetadata(c)
+				if err == nil && chatFile.Metadata.Favorite {
+					favorites = append(favorites, c)
+				}
+			}
+			if len(favorites) == 0 {
+				continue
+			}
+			idx, err := selectFromList("Select Favorite to Unmark", favorites)
+			if err != nil || idx < 0 || idx >= len(favorites) {
+				continue
+			}
+			if err := toggleChatFavorite(favorites[idx]); err != nil {
+				return err
+			}
+		case 3: // Back
+			return nil
+		}
+	}
+}
+
+func GUIMenuPrompts() error {
+	promptMenuOptions := []string{"List Prompts", "Add Prompt", "Remove Prompt", "Set Default Prompt", "Back"}
+	for {
+		model := MenuModel{
+			title:    "Prompts",
+			options:  promptMenuOptions,
+			selected: 0,
+			quitting: false,
+			width:    80,
+			height:   24,
+		}
+		p := tea.NewProgram(model, tea.WithAltScreen())
+		finalModel, err := p.Run()
+		if err != nil {
+			return err
+		}
+		menuModel := finalModel.(MenuModel)
+		switch menuModel.selected {
+		case 0: // List Prompts
+			prompts, err := loadPrompts()
+			if err != nil {
+				return err
+			}
+			var names []string
+			for _, p := range prompts {
+				name := p.Name
+				if p.Default {
+					name += " (default)"
+				}
+				names = append(names, name)
+			}
+			_, _ = selectFromList("Prompts", names)
+		case 1: // Add Prompt
+			reader := bufio.NewReader(os.Stdin)
+			fmt.Print("Prompt name: ")
+			name, _ := reader.ReadString('\n')
+			name = strings.TrimSpace(name)
+			fmt.Print("Prompt content: ")
+			content, _ := reader.ReadString('\n')
+			content = strings.TrimSpace(content)
+			prompts, err := loadPrompts()
+			if err != nil {
+				return err
+			}
+			prompts = append(prompts, Prompt{Name: name, Content: content})
+			if err := savePrompts(prompts); err != nil {
+				return err
+			}
+		case 2: // Remove Prompt
+			prompts, err := loadPrompts()
+			if err != nil {
+				return err
+			}
+			var names []string
+			for _, p := range prompts {
+				names = append(names, p.Name)
+			}
+			idx, err := selectFromList("Remove Prompt", names)
+			if err != nil || idx < 0 || idx >= len(prompts) {
+				continue
+			}
+			prompts = append(prompts[:idx], prompts[idx+1:]...)
+			if err := savePrompts(prompts); err != nil {
+				return err
+			}
+		case 3: // Set Default Prompt
+			prompts, err := loadPrompts()
+			if err != nil {
+				return err
+			}
+			var names []string
+			for _, p := range prompts {
+				names = append(names, p.Name)
+			}
+			idx, err := selectFromList("Set Default Prompt", names)
+			if err != nil || idx < 0 || idx >= len(prompts) {
+				continue
+			}
+			for i := range prompts {
+				prompts[i].Default = (i == idx)
+			}
+			if err := savePrompts(prompts); err != nil {
+				return err
+			}
+		case 4: // Back
+			return nil
+		}
+	}
+}
+
+func GUIMenuModels() error {
+	modelMenuOptions := []string{"List Models", "Add Model", "Remove Model", "Set Default Model", "Back"}
+	for {
+		model := MenuModel{
+			title:    "Models",
+			options:  modelMenuOptions,
+			selected: 0,
+			quitting: false,
+			width:    80,
+			height:   24,
+		}
+		p := tea.NewProgram(model, tea.WithAltScreen())
+		finalModel, err := p.Run()
+		if err != nil {
+			return err
+		}
+		menuModel := finalModel.(MenuModel)
+		switch menuModel.selected {
+		case 0: // List Models
+			models, defaultModel, err := loadModelsWithMostRecent()
+			if err != nil {
+				return err
+			}
+			var names []string
+			for _, m := range models {
+				name := m
+				if m == defaultModel {
+					name += " (default)"
+				}
+				names = append(names, name)
+			}
+			_, _ = selectFromList("Models", names)
+		case 1: // Add Model
+			reader := bufio.NewReader(os.Stdin)
+			fmt.Print("Model name: ")
+			name, _ := reader.ReadString('\n')
+			name = strings.TrimSpace(name)
+			// TODO: Actually add model to config and save
+			fmt.Println("Model added (not yet implemented)")
+		case 2: // Remove Model
+			models, _, err := loadModelsWithMostRecent()
+			if err != nil {
+				return err
+			}
+			idx, err := selectFromList("Remove Model", models)
+			if err != nil || idx < 0 || idx >= len(models) {
+				continue
+			}
+			// TODO: Actually remove model from config and save
+			fmt.Println("Model removed (not yet implemented)")
+		case 3: // Set Default Model
+			models, _, err := loadModelsWithMostRecent()
+			if err != nil {
+				return err
+			}
+			idx, err := selectFromList("Set Default Model", models)
+			if err != nil || idx < 0 || idx >= len(models) {
+				continue
+			}
+			// TODO: Actually set default model in config and save
+			fmt.Println("Default model set (not yet implemented)")
+		case 4: // Back
+			return nil
+		}
+	}
+}
+
+func GUIMenuAPIKey() error {
+	apiKeyMenuOptions := []string{"List API Keys", "Add API Key", "Remove API Key", "Set Active API Key", "Back"}
+	for {
+		model := MenuModel{
+			title:    "API Key",
+			options:  apiKeyMenuOptions,
+			selected: 0,
+			quitting: false,
+			width:    80,
+			height:   24,
+		}
+		p := tea.NewProgram(model, tea.WithAltScreen())
+		finalModel, err := p.Run()
+		if err != nil {
+			return err
+		}
+		menuModel := finalModel.(MenuModel)
+		switch menuModel.selected {
+		case 0: // List API Keys
+			config, err := loadAPIKeys()
+			if err != nil {
+				return err
+			}
+			var names []string
+			for _, k := range config.Keys {
+				name := k.Title
+				if k.Title == config.ActiveKey {
+					name += " (active)"
+				}
+				names = append(names, name)
+			}
+			_, _ = selectFromList("API Keys", names)
+		case 1: // Add API Key
+			reader := bufio.NewReader(os.Stdin)
+			fmt.Print("API Key title: ")
+			title, _ := reader.ReadString('\n')
+			title = strings.TrimSpace(title)
+			fmt.Print("API Key: ")
+			key, _ := reader.ReadString('\n')
+			key = strings.TrimSpace(key)
+			if err := addAPIKey(title, key); err != nil {
+				return err
+			}
+		case 2: // Remove API Key
+			config, err := loadAPIKeys()
+			if err != nil {
+				return err
+			}
+			var names []string
+			for _, k := range config.Keys {
+				names = append(names, k.Title)
+			}
+			idx, err := selectFromList("Remove API Key", names)
+			if err != nil || idx < 0 || idx >= len(config.Keys) {
+				continue
+			}
+			// Remove key
+			config.Keys = append(config.Keys[:idx], config.Keys[idx+1:]...)
+			if err := saveAPIKeys(config); err != nil {
+				return err
+			}
+		case 3: // Set Active API Key
+			config, err := loadAPIKeys()
+			if err != nil {
+				return err
+			}
+			var names []string
+			for _, k := range config.Keys {
+				names = append(names, k.Title)
+			}
+			idx, err := selectFromList("Set Active API Key", names)
+			if err != nil || idx < 0 || idx >= len(config.Keys) {
+				continue
+			}
+			config.ActiveKey = config.Keys[idx].Title
+			if err := saveAPIKeys(config); err != nil {
+				return err
+			}
+		case 4: // Back
+			return nil
+		}
+	}
+}
+
+func GUIShowHelp() error {
+	helpMenuOptions := []string{"Show Controls", "Show About", "Back"}
+	for {
+		model := MenuModel{
+			title:    "Help",
+			options:  helpMenuOptions,
+			selected: 0,
+			quitting: false,
+			width:    80,
+			height:   24,
+		}
+		p := tea.NewProgram(model, tea.WithAltScreen())
+		finalModel, err := p.Run()
+		if err != nil {
+			return err
+		}
+		menuModel := finalModel.(MenuModel)
+		switch menuModel.selected {
+		case 0: // Show Controls
+			fmt.Println("\nControls Cheat Sheet:\n")
+			fmt.Println("| Menu/General         | Chat Window           | Vim-style      |\n|---------------------|----------------------|---------------|")
+			fmt.Println("| ↑↓      Navigate    | Enter   Send message | :g  AI Title  |\n| Enter   Select      | Ctrl+S Stop request  | :t \"Title\"    |\n| Esc     Back        | Ctrl+C Quit          | :f  Favorite  |\n| Ctrl+C  Quit        | ↑↓      Scroll msgs  | :q  Quit      |\n|                     | PgUp/Dn Scroll page  |               |\n|                     | Home/End Top/Bottom  |               |\n|                     |                      |               |\n")
+			fmt.Println("Press Enter to continue...")
+			bufio.NewReader(os.Stdin).ReadBytes('\n')
+		case 1: // Show About
+			fmt.Println("\nGo AI CLI - Terminal AI Chat\nBuilt with Go, Bubble Tea, Lipgloss\nhttps://github.com/aculd/go-ai-cli\n")
+			fmt.Println("Press Enter to continue...")
+			bufio.NewReader(os.Stdin).ReadBytes('\n')
+		case 2: // Back
+			return nil
+		}
+	}
+}
 
 // Minimal stubs for missing types and functions to fix build errors
 // YesNoModel is a placeholder for confirmation dialogs
