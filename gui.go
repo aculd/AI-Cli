@@ -137,6 +137,10 @@ func (g *ChatGUI) handleVimCommand(cmd string) bool {
 			return false // Exit
 		}
 		return true
+	case ":h":
+		// g.showHelp = true // REMOVE this line, ChatGUI does not have showHelp
+		// Instead, handle help popup in ChatModel only
+		return true
 	default:
 		return false // Not a vim command, treat as regular input
 	}
@@ -368,6 +372,8 @@ type ChatModel struct {
 	generatingTitle bool      // Whether we are generating a title
 	showError       bool      // Whether to show an error popup
 	errorMsg        string    // The error message to display
+	cursorPos       int       // Current cursor position in the input buffer
+	showHelp        bool      // Whether to show the help popup
 }
 
 func (m ChatModel) Init() tea.Cmd {
@@ -380,6 +386,19 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.showError {
 			if msg.String() == "esc" {
 				m.showError = false
+			}
+			return m, nil
+		}
+		if m.generatingTitle {
+			if msg.String() == "esc" {
+				m.generatingTitle = false
+				m.status = "Title generation cancelled"
+			}
+			return m, nil
+		}
+		if m.showHelp {
+			if msg.String() == "esc" {
+				m.showHelp = false
 			}
 			return m, nil
 		}
@@ -417,17 +436,40 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.showConfirm = true
 				return m, nil
 			}
-		default:
-			if m.showConfirm {
-				// User cancelled exit confirmation
-				m.showConfirm = false
-				return m, nil
+		case "left":
+			if m.cursorPos > 0 {
+				m.cursorPos--
 			}
-			if !m.loading && len(msg.String()) == 1 {
-				char := msg.String()[0]
-				if char >= 32 && char <= 126 {
-					m.inputBuffer += msg.String()
-				}
+		case "right":
+			if m.cursorPos < len(m.inputBuffer) {
+				m.cursorPos++
+			}
+		case "home":
+			if !m.loading && m.inputBuffer == "" {
+				// Scroll to top
+				m.scrollPos = 0
+				m.autoScroll = false
+			} else {
+				// Move cursor to start
+				m.cursorPos = 0
+			}
+		case "end":
+			if !m.loading && m.inputBuffer == "" {
+				// Scroll to bottom
+				m.scrollPos = max(0, len(m.getVisibleMessages())-(m.height-6))
+				m.autoScroll = true
+			} else {
+				// Move cursor to end
+				m.cursorPos = len(m.inputBuffer)
+			}
+		case "backspace":
+			if m.cursorPos > 0 && len(m.inputBuffer) > 0 {
+				m.inputBuffer = m.inputBuffer[:m.cursorPos-1] + m.inputBuffer[m.cursorPos:]
+				m.cursorPos--
+			}
+		case "delete":
+			if m.cursorPos < len(m.inputBuffer) && len(m.inputBuffer) > 0 {
+				m.inputBuffer = m.inputBuffer[:m.cursorPos] + m.inputBuffer[m.cursorPos+1:]
 			}
 		case "enter":
 			if m.inputBuffer != "" && !m.loading {
@@ -452,65 +494,52 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				copy(messagesCopy, m.messages)
 				return m, tea.Batch(getAIResponseCmd(messagesCopy, m.model, m.stopChan), spinnerTick())
 			}
-		case "backspace":
-			if !m.loading && len(m.inputBuffer) > 0 {
-				m.inputBuffer = m.inputBuffer[:len(m.inputBuffer)-1]
-			}
 		case "pageup":
 			if !m.loading {
 				// Scroll up by half the chat box height
-				chatBoxHeight := m.height - 6 // Approximate chat box height
-				m.scrollPos = max(0, m.scrollPos-chatBoxHeight/2)
+				m.scrollPos = max(0, m.scrollPos-1)
 				m.autoScroll = false
 			}
 		case "pagedown":
 			if !m.loading {
 				// Scroll down by half the chat box height
-				chatBoxHeight := m.height - 6
-				maxScroll := max(0, len(m.getVisibleMessages())-chatBoxHeight)
-				m.scrollPos = min(maxScroll, m.scrollPos+chatBoxHeight/2)
+				maxScroll := max(0, len(m.getVisibleMessages())-1)
+				m.scrollPos = min(maxScroll, m.scrollPos+1)
 				m.autoScroll = false
-			}
-		case "home":
-			if !m.loading {
-				// Scroll to top
-				m.scrollPos = 0
-				m.autoScroll = false
-			}
-		case "end":
-			if !m.loading {
-				// Scroll to bottom
-				m.scrollPos = max(0, len(m.getVisibleMessages())-(m.height-6))
-				m.autoScroll = true
 			}
 		case "up":
-			if !m.loading {
-				if m.inputBuffer == "" {
-					// Scroll up one message when not typing
-					m.scrollPos = max(0, m.scrollPos-1)
-					m.autoScroll = false
-				}
-				// Don't add to input buffer when scrolling
+			if !m.loading && m.inputBuffer == "" {
+				// Scroll up one message when not typing
+				m.scrollPos = max(0, m.scrollPos-1)
+				m.autoScroll = false
 			}
+			// For multi-line input, move cursor up a line (not implemented)
 		case "down":
+			if !m.loading && m.inputBuffer == "" {
+				// Scroll down one message when not typing
+				maxScroll := max(0, len(m.getVisibleMessages())-(m.height-6))
+				m.scrollPos = min(maxScroll, m.scrollPos+1)
+				m.autoScroll = false
+			}
+			// For multi-line input, move cursor down a line (not implemented)
+		case "shift+up", "pgup":
 			if !m.loading {
-				if m.inputBuffer == "" {
-					// Scroll down one message when not typing
-					maxScroll := max(0, len(m.getVisibleMessages())-(m.height-6))
-					m.scrollPos = min(maxScroll, m.scrollPos+1)
-					m.autoScroll = false
-				}
-				// Don't add to input buffer when scrolling
+				m.scrollPos = max(0, m.scrollPos-1)
+				m.autoScroll = false
+			}
+		case "shift+down", "pgdn":
+			if !m.loading {
+				maxScroll := max(0, len(m.getVisibleMessages())-1)
+				m.scrollPos = min(maxScroll, m.scrollPos+1)
+				m.autoScroll = false
 			}
 		case "ctrl+up":
 			if !m.loading {
-				// Scroll up one message
 				m.scrollPos = max(0, m.scrollPos-1)
 				m.autoScroll = false
 			}
 		case "ctrl+down":
 			if !m.loading {
-				// Scroll down one message
 				maxScroll := max(0, len(m.getVisibleMessages())-(m.height-6))
 				m.scrollPos = min(maxScroll, m.scrollPos+1)
 				m.autoScroll = false
@@ -628,7 +657,7 @@ func (m ChatModel) View() string {
 	}
 
 	// Add vim commands hint
-	controlHints = append(controlHints, ":g to generate title, :t \"title\" to set title, :f to favorite, :q to quit")
+	controlHints = append(controlHints, ":g to generate title, :t \"title\" to set title, :f to favorite, :q to quit, :h for help")
 
 	if len(controlHints) > 0 {
 		statusText += " | " + strings.Join(controlHints, ", ")
@@ -708,7 +737,12 @@ func (m ChatModel) View() string {
 			scrollIndicatorTop = "↑ More messages above ↑\n"
 		}
 		if m.scrollPos < len(visibleMessages)-chatBoxHeight {
-			scrollIndicatorBottom = "\n↓ More messages below ↓"
+			indicator := ""
+			indicatorText := "↓ More messages below ↓"
+			indicator = lipgloss.NewStyle().Width(m.width - 2).Align(lipgloss.Center).Foreground(lipgloss.Color("39")).Render(indicatorText)
+			scrollIndicatorBottom = "\n" + indicator
+		} else {
+			scrollIndicatorBottom = ""
 		}
 	}
 
@@ -745,13 +779,27 @@ func (m ChatModel) View() string {
 	}
 
 	// Input area - always 3 lines tall at bottom
-	inputText := "Input: " + m.inputBuffer
+	inputText := "Input: "
+	if m.cursorPos > len(m.inputBuffer) {
+		m.cursorPos = len(m.inputBuffer)
+	}
+	inputRunes := []rune(m.inputBuffer)
+	cursor := "|"
+	renderedInput := ""
+	for i := 0; i <= len(inputRunes); i++ {
+		if i == m.cursorPos {
+			renderedInput += cursor
+		}
+		if i < len(inputRunes) {
+			renderedInput += string(inputRunes[i])
+		}
+	}
+	inputText += renderedInput
 	if m.loading {
 		inputText += " " + getSpinnerChar(m.spinner) + " waiting for response... (ctrl + s to stop and edit message)"
 	} else if m.inputBuffer == "" {
 		inputText += " waiting for input..."
-		// Add vim command hints on a new line
-		inputText += "\nsend :g to generate title, :t \"title\" to set title, :f to favorite, :q to quit"
+		inputText += "\nType :h for help"
 	}
 
 	// Pad input text to fill 3 lines
@@ -790,6 +838,19 @@ func (m ChatModel) View() string {
 		errorBox := errorStyle.Width(m.width - 10).Render(m.errorMsg + "\n\nESC to close")
 		centeredError := lipgloss.NewStyle().Margin((m.height-5)/2, (m.width-lipgloss.Width(errorBox))/2).Render(errorBox)
 		return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(centeredError)
+	}
+
+	if m.showHelp {
+		helpStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("39")).
+			Padding(1, 2).
+			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("252"))
+		helpText := "Vim Commands:\n:g  Generate title\n:t \"title\"  Set title\n:f  Favorite\n:q  Quit\n:h  Help\n\nChat Scroll:\nShift+Up/Down, PgUp/PgDn  Scroll chat\nHome/End  Move cursor\nLeft/Right  Move cursor"
+		helpBox := helpStyle.Width(m.width - 10).Render(helpText + "\n\nESC to close")
+		centeredHelp := lipgloss.NewStyle().Margin((m.height-7)/2, (m.width-lipgloss.Width(helpBox))/2).Render(helpBox)
+		return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(centeredHelp)
 	}
 
 	return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(layout)
@@ -2278,6 +2339,10 @@ func (m *ChatModel) handleVimCommand(cmd string) bool {
 			m.quitting = true
 			return true
 		}
+		return true
+	case cmd == ":h":
+		// g.showHelp = true // REMOVE this line, ChatGUI does not have showHelp
+		// Instead, handle help popup in ChatModel only
 		return true
 	default:
 		return false
