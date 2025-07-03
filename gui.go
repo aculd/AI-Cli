@@ -319,47 +319,55 @@ func wrapText(text string, width int) string {
 		return text
 	}
 
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return text
-	}
+	lines := strings.Split(text, "\n")
+	var wrapped []string
 
-	var lines []string
-	currentLine := words[0]
-
-	for i := 1; i < len(words); i++ {
-		word := words[i]
-		if len(currentLine)+1+len(word) <= width {
-			currentLine += " " + word
-		} else {
-			lines = append(lines, currentLine)
-			currentLine = word
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" {
+			wrapped = append(wrapped, "")
+			continue
+		}
+		words := strings.Fields(line)
+		if len(words) == 0 {
+			wrapped = append(wrapped, "")
+			continue
+		}
+		currentLine := words[0]
+		for i := 1; i < len(words); i++ {
+			word := words[i]
+			if len(currentLine)+1+len(word) <= width {
+				currentLine += " " + word
+			} else {
+				wrapped = append(wrapped, currentLine)
+				currentLine = word
+			}
+		}
+		if currentLine != "" {
+			wrapped = append(wrapped, currentLine)
 		}
 	}
-
-	if currentLine != "" {
-		lines = append(lines, currentLine)
-	}
-
-	return strings.Join(lines, "\n")
+	return strings.Join(wrapped, "\n")
 }
 
 // ChatModel represents the Bubble Tea model for the chat interface
 type ChatModel struct {
-	chatName    string
-	messages    []Message
-	model       string
-	inputBuffer string
-	width       int
-	height      int
-	status      string
-	quitting    bool
-	loading     bool
-	spinner     int
-	scrollPos   int       // Current scroll position (index of first visible message)
-	autoScroll  bool      // Whether to auto-scroll to bottom
-	stopChan    chan bool // Channel to signal stop request
-	showConfirm bool      // Whether to show exit confirmation
+	chatName        string
+	messages        []Message
+	model           string
+	inputBuffer     string
+	width           int
+	height          int
+	status          string
+	quitting        bool
+	loading         bool
+	spinner         int
+	scrollPos       int       // Current scroll position (index of first visible message)
+	autoScroll      bool      // Whether to auto-scroll to bottom
+	stopChan        chan bool // Channel to signal stop request
+	showConfirm     bool      // Whether to show exit confirmation
+	generatingTitle bool      // Whether we are generating a title
+	showError       bool      // Whether to show an error popup
+	errorMsg        string    // The error message to display
 }
 
 func (m ChatModel) Init() tea.Cmd {
@@ -369,6 +377,12 @@ func (m ChatModel) Init() tea.Cmd {
 func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
+		if m.showError {
+			if msg.String() == "esc" {
+				m.showError = false
+			}
+			return m, nil
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			m.quitting = true
@@ -419,6 +433,10 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.inputBuffer != "" && !m.loading {
 				if strings.HasPrefix(m.inputBuffer, ":") {
 					if m.handleVimCommand(m.inputBuffer) {
+						if m.generatingTitle {
+							m.inputBuffer = ""
+							return m, tea.Batch(generateTitleCmd(m.messages, m.model), spinnerTick())
+						}
 						m.inputBuffer = ""
 						return m, nil
 					}
@@ -540,6 +558,14 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if err := saveChat(m.chatName, m.messages); err != nil {
 			m.status = fmt.Sprintf("Save error: %v", err)
 		}
+	case aiTitleMsg:
+		m.generatingTitle = false
+		if err := setChatTitle(m.chatName, msg.title); err == nil {
+			m.status = fmt.Sprintf("Title generated: %s", msg.title)
+		} else {
+			m.status = "Failed to set title"
+		}
+		return m, nil
 	}
 	return m, nil
 }
@@ -740,6 +766,31 @@ func (m ChatModel) View() string {
 
 	// Compose final layout
 	layout := fmt.Sprintf("%s\n%s\n\n%s\n\n%s", header, status, chatBox, inputBox)
+
+	if m.generatingTitle {
+		popupStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("39")).
+			Padding(1, 2).
+			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("252"))
+		popupText := fmt.Sprintf("Generating title %s\n\nESC to cancel", getSpinnerChar(m.spinner))
+		popupBox := popupStyle.Width(m.width - 10).Render(popupText)
+		centeredPopup := lipgloss.NewStyle().Margin((m.height-5)/2, (m.width-lipgloss.Width(popupBox))/2).Render(popupBox)
+		return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(centeredPopup)
+	}
+
+	if m.showError {
+		errorStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("203")).
+			Padding(1, 2).
+			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("252"))
+		errorBox := errorStyle.Width(m.width - 10).Render(m.errorMsg + "\n\nESC to close")
+		centeredError := lipgloss.NewStyle().Margin((m.height-5)/2, (m.width-lipgloss.Width(errorBox))/2).Render(errorBox)
+		return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(centeredError)
+	}
 
 	return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(layout)
 }
@@ -2197,14 +2248,16 @@ func (m *ChatModel) handleVimCommand(cmd string) bool {
 	case strings.HasPrefix(cmd, ":t "):
 		// Set custom title
 		title := strings.TrimSpace(strings.TrimPrefix(cmd, ":t "))
-		// Remove quotes if present
 		title = strings.Trim(title, `"'`)
-		if title != "" {
-			if err := setChatTitle(m.chatName, title); err == nil {
-				m.status = fmt.Sprintf("Title set: %s", title)
-			} else {
-				m.status = "Failed to set title"
-			}
+		if title == "" {
+			m.showError = true
+			m.errorMsg = "Please enter a title\nExample: :t \"My Project Chat\""
+			return true
+		}
+		if err := setChatTitle(m.chatName, title); err == nil {
+			m.status = fmt.Sprintf("Title set: %s", title)
+		} else {
+			m.status = "Failed to set title"
 		}
 		return true
 	case cmd == ":f":
@@ -2398,4 +2451,16 @@ func parseLists(text string) string {
 	})
 
 	return text
+}
+
+// Add generateTitleCmd
+func generateTitleCmd(messages []Message, model string) tea.Cmd {
+	return func() tea.Msg {
+		title := generateChatTitle(messages, model)
+		return aiTitleMsg{title: title}
+	}
+}
+
+type aiTitleMsg struct {
+	title string
 }
