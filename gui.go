@@ -687,35 +687,21 @@ func (m ChatModel) View() string {
 		for i := startIdx; i < endIdx; i++ {
 			msg := visibleMessages[i]
 			var messageText string
-
-			// Parse markdown and word wrap long messages
 			parsedContent := parseMarkdown(msg.Content)
 			wrappedContent := wrapText(parsedContent, m.width-15)
 			lines := strings.Split(wrappedContent, "\n")
-
+			var boxStyle lipgloss.Style
 			if msg.Role == "user" {
-				if len(lines) > 0 {
-					messageText = userStyle.Render("You:") + " " + lines[0]
-					// Add continuation lines for wrapped text
-					for j := 1; j < len(lines); j++ {
-						messageText += "\n" + strings.Repeat(" ", 4) + lines[j]
-					}
-				} else {
-					messageText = userStyle.Render("You:") + " " + parsedContent
-				}
-			} else if msg.Role == "assistant" {
-				if len(lines) > 0 {
-					messageText = assistantStyle.Render("Assistant:") + " " + lines[0]
-					// Add continuation lines for wrapped text
-					for j := 1; j < len(lines); j++ {
-						messageText += "\n" + strings.Repeat(" ", 11) + lines[j] // "Assistant: " is 11 chars
-					}
-				} else {
-					messageText = assistantStyle.Render("Assistant:") + " " + parsedContent
-				}
+				boxStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("203")).Padding(1, 2).Margin(1, 0)
+			} else {
+				boxStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("39")).Padding(1, 2).Margin(1, 0)
 			}
-
-			visible = append(visible, messageText)
+			if msg.Role == "user" {
+				messageText = userStyle.Render("You:") + "\n" + strings.Join(lines, "\n")
+			} else {
+				messageText = assistantStyle.Render("Assistant:") + "\n" + strings.Join(lines, "\n")
+			}
+			visible = append(visible, boxStyle.Render(messageText))
 		}
 	}
 
@@ -972,7 +958,7 @@ func (m MenuModel) View() string {
 // Main menu
 func RunGUIMainMenu() error {
 	for {
-		mainMenuOptions := []string{"Chats", "Favorites", "Prompts", "Models", "API Key", "Exit"}
+		mainMenuOptions := []string{"Chats", "Favorites", "Prompts", "Models", "API Key", "Help", "Exit"}
 		model := MenuModel{
 			title:    "Main Menu",
 			options:  mainMenuOptions,
@@ -1007,6 +993,10 @@ func RunGUIMainMenu() error {
 			}
 		case "API Key":
 			if err := GUIMenuAPIKey(); err != nil {
+				return err
+			}
+		case "Help":
+			if err := GUIShowHelp(); err != nil {
 				return err
 			}
 		}
@@ -2528,4 +2518,56 @@ func generateTitleCmd(messages []Message, model string) tea.Cmd {
 
 type aiTitleMsg struct {
 	title string
+}
+
+// Move helpModel and its methods to top-level:
+type helpModel struct{ quitting bool }
+
+var helpText = `
+Go AI CLI - Help
+
+Controls:
+  Arrow keys: Move cursor in input
+  Home/End: Move to start/end of input (or scroll if input is empty)
+  Shift+Up/Down, PgUp/PgDn: Scroll chat
+  Ctrl+S: Stop/cancel AI response
+  Ctrl+C: Quit
+  :g - Generate chat title
+  :t "title" - Set chat title
+  :f - Toggle favorite
+  :q - Save and quit chat
+  :h - Show this help
+
+Paths:
+  .util path: .util
+  Chats folder: .util/chats
+
+Functionality:
+  - Markdown rendering for chat messages
+  - Scrollable chat history
+  - Input box with navigation and cursor
+  - Popups for errors, help, and title generation
+  - Multi-chat management
+`
+
+func (m helpModel) Init() tea.Cmd { return nil }
+func (m helpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if key, ok := msg.(tea.KeyMsg); ok && key.String() == "esc" {
+		return helpModel{quitting: true}, tea.Quit
+	}
+	return m, nil
+}
+func (m helpModel) View() string {
+	helpStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(2, 4).Width(80).Align(lipgloss.Center)
+	redStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
+	box := helpStyle.Render(helpText + "\n\n" + redStyle.Render("Press ESC to return to main menu"))
+	padV := (24 - lipgloss.Height(box)) / 2
+	padH := (100 - lipgloss.Width(box)) / 2
+	return lipgloss.NewStyle().Margin(padV, padH).Render(box)
+}
+
+// Update GUIShowHelp to just run the program:
+func GUIShowHelp() error {
+	_, err := tea.NewProgram(helpModel{}, tea.WithAltScreen()).Run()
+	return err
 }
