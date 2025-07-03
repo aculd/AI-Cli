@@ -2523,10 +2523,7 @@ type aiTitleMsg struct {
 // Move helpModel and its methods to top-level:
 type helpModel struct{ quitting bool }
 
-var helpText = `
-Go AI CLI - Help
-
-Controls:
+var helpText = `Controls:
   Arrow keys: Move cursor in input
   Home/End: Move to start/end of input (or scroll if input is empty)
   Shift+Up/Down, PgUp/PgDn: Scroll chat
@@ -2558,9 +2555,19 @@ func (m helpModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 func (m helpModel) View() string {
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63")).Align(lipgloss.Center)
+	sectionStyle := lipgloss.NewStyle().Bold(true)
 	helpStyle := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(2, 4).Width(80).Align(lipgloss.Center)
 	redStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Bold(true)
-	box := helpStyle.Render(helpText + "\n\n" + redStyle.Render("Press ESC to return to main menu"))
+
+	title := titleStyle.Render("AI CLI - Help")
+	desc := "This is a command line interface for chatting with AI APIs."
+	controls := sectionStyle.Render("Controls:") + "\n  Arrow keys: Move cursor in input\n  Home/End: Move to start/end of input (or scroll if input is empty)\n  Shift+Up/Down, PgUp/PgDn: Scroll chat\n  Ctrl+S: Stop/cancel AI response\n  Ctrl+C: Quit\n  :g - Generate chat title\n  :t \"title\" - Set chat title\n  :f - Toggle favorite\n  :q - Save and quit chat\n  :h - Show this help"
+	paths := sectionStyle.Render("Paths:") + "\n  .util path: .util\n  Chats folder: .util/chats"
+	funcs := sectionStyle.Render("Functionality:") + "\n  - Markdown rendering for chat messages\n  - Scrollable chat history\n  - Input box with navigation and cursor\n  - Popups for errors, help, and title generation\n  - Multi-chat management"
+
+	helpContent := title + "\n" + desc + "\n\n" + controls + "\n\n" + paths + "\n\n" + funcs
+	box := helpStyle.Render(helpContent + "\n\n" + redStyle.Render("Press ESC to return to main menu"))
 	padV := (24 - lipgloss.Height(box)) / 2
 	padH := (100 - lipgloss.Width(box)) / 2
 	return lipgloss.NewStyle().Margin(padV, padH).Render(box)
