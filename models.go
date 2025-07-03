@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 )
 
@@ -73,23 +72,6 @@ func modelsFilePath() string {
 	return filepath.Join(utilPath, "models.json")
 }
 
-// ModelError wraps model-related errors
-type ModelError struct {
-	Op  string
-	Err error
-}
-
-func (e *ModelError) Error() string {
-	return fmt.Sprintf("%s: %v", e.Op, e.Err)
-}
-
-// handleModelError handles model-specific errors with appropriate user feedback
-func handleModelError(err error, operation string) {
-	if err != nil {
-		fmt.Printf("\033[31mModel error during %s: %v\033[0m\n", operation, err)
-	}
-}
-
 // DefaultModel returns fallback default model string
 func DefaultModel() string {
 	return "deepseek/deepseek-chat-v3-0324:free"
@@ -108,11 +90,11 @@ func initializeModelsFile() error {
 
 	data, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		return &ModelError{"marshal default models", err}
+		return err
 	}
 
 	if err := os.WriteFile(modelsFilePath(), data, 0644); err != nil {
-		return &ModelError{"write models file", err}
+		return err
 	}
 
 	fmt.Println("Initialized models file with defaults.")
@@ -125,17 +107,17 @@ func loadModelsWithMostRecent() ([]string, string, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			if err := initializeModelsFile(); err != nil {
-				return nil, "", &ModelError{"initialize models file", err}
+				return nil, "", err
 			}
 			defaultModel := DefaultModel()
 			return []string{defaultModel}, defaultModel, nil
 		}
-		return nil, "", &ModelError{"read models file", err}
+		return nil, "", err
 	}
 
 	var config ModelsConfig
 	if err := json.Unmarshal(data, &config); err != nil {
-		return nil, "", &ModelError{"parse models file", err}
+		return nil, "", err
 	}
 
 	var models []string
@@ -155,82 +137,6 @@ func loadModelsWithMostRecent() ([]string, string, error) {
 	}
 
 	return models, defaultModel, nil
-}
-
-// saveModelsWithMostRecent saves models list with updated default model
-func saveModelsWithMostRecent(defaultModel string, modelNames []string) error {
-	var config ModelsConfig
-	for _, name := range modelNames {
-		config.Models = append(config.Models, Model{
-			Name:      name,
-			IsDefault: name == defaultModel,
-		})
-	}
-
-	data, err := json.MarshalIndent(config, "", "  ")
-	if err != nil {
-		return &ModelError{"marshal models", err}
-	}
-
-	if err := os.WriteFile(modelsFilePath(), data, 0644); err != nil {
-		return &ModelError{"save models file", err}
-	}
-
-	return nil
-}
-
-// selectModel interactively lets user pick or add models
-func selectModel(reader *bufio.Reader) (string, error) {
-	models, mostRecent, err := loadModelsWithMostRecent()
-	if err != nil {
-		return "", err
-	}
-
-	fmt.Println("\nAvailable models:")
-	for i, m := range models {
-		mark := " "
-		if m == mostRecent {
-			mark = "*"
-		}
-		fmt.Printf("%d) %s %s\n", i+1, m, mark)
-	}
-	fmt.Println("a) Add new model")
-	fmt.Printf("Choose model number or 'a' to add (default *): ")
-
-	_, _ = reader.ReadString('\n') // Ignore the input since we're using the mostRecent value
-	return mostRecent, nil
-}
-
-func promptModelAtChatStart(reader *bufio.Reader) (string, error) {
-	models, mostRecent, err := loadModelsWithMostRecent()
-	if err != nil {
-		return "", err
-	}
-
-	fmt.Println("\nSelect model for this chat:")
-	for i, model := range models {
-		mark := " "
-		if model == mostRecent {
-			mark = "*"
-		}
-		fmt.Printf("%d) %s %s\n", i+1, model, mark)
-	}
-
-	fmt.Printf("Enter model number (or press Enter for default '%s'): ", mostRecent)
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(input)
-
-	if input == "" {
-		return mostRecent, nil
-	}
-
-	var choice int
-	if _, err := fmt.Sscanf(input, "%d", &choice); err != nil || choice < 1 || choice > len(models) {
-		fmt.Println("Invalid input; using default model.")
-		return mostRecent, nil
-	}
-
-	return models[choice-1], nil
 }
 
 // streamChatResponse handles the chat API response streaming
@@ -369,162 +275,4 @@ func streamChatResponse(messages []Message, model string) (string, error) {
 		fmt.Println()
 	}
 	return fullReply.String(), nil
-}
-
-// setDefaultModelFlow allows selecting a model to set as default
-func setDefaultModelFlow(reader *bufio.Reader) error {
-	models, mostRecent, err := loadModelsWithMostRecent()
-	if err != nil {
-		return err
-	}
-
-	if len(models) == 0 {
-		return fmt.Errorf("no models available")
-	}
-
-	fmt.Println("\nSelect model to set as default:")
-	for i, m := range models {
-		mark := " "
-		if m == mostRecent {
-			mark = "*"
-		}
-		fmt.Printf("%d) %s %s\n", i+1, m, mark)
-	}
-
-	fmt.Print("Enter model number to set as default: ")
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(input)
-
-	idx, err := strconv.Atoi(input)
-	if err != nil || idx < 1 || idx > len(models) {
-		return fmt.Errorf("invalid model number")
-	}
-
-	newDefault := models[idx-1]
-	if err := saveModelsWithMostRecent(newDefault, models); err != nil {
-		return fmt.Errorf("failed to save models: %w", err)
-	}
-
-	fmt.Printf("Set '%s' as default model\n", newDefault)
-	return nil
-}
-
-func modelsMenu(reader *bufio.Reader) error {
-	menu := Menu{
-		Title: "Models Menu",
-		Items: []MenuItem{
-			{Label: "List models", Handler: func(r *bufio.Reader) error {
-				listModels()
-				return nil
-			}},
-			{Label: "Add model", Handler: addModelFlow},
-			{Label: "Remove model", Handler: removeModelFlow},
-			{Label: "Set default model", Handler: setDefaultModelFlow},
-			{Label: "Back to main menu", ExitItem: true},
-		},
-	}
-	RunMenu(menu, reader)
-	return nil
-}
-
-func listModels() {
-	models, mostRecent, err := loadModelsWithMostRecent()
-	if err != nil {
-		fmt.Println("Error loading models:", err)
-		return
-	}
-
-	fmt.Println("\nAvailable models:")
-	for i, m := range models {
-		mark := " "
-		if m == mostRecent {
-			mark = "*"
-		}
-		fmt.Printf("%d) %s %s\n", i+1, m, mark)
-	}
-}
-
-func addModelFlow(reader *bufio.Reader) error {
-	fmt.Print("Enter new model name: ")
-	newModel, _ := reader.ReadString('\n')
-	newModel = strings.TrimSpace(newModel)
-
-	if newModel == "" {
-		return fmt.Errorf("model name cannot be empty")
-	}
-
-	models, mostRecent, err := loadModelsWithMostRecent()
-	if err != nil {
-		return err
-	}
-
-	// Check for duplicates
-	for _, m := range models {
-		if m == newModel {
-			return fmt.Errorf("model already exists")
-		}
-	}
-
-	models = append(models, newModel)
-	if err := saveModelsWithMostRecent(mostRecent, models); err != nil {
-		return fmt.Errorf("failed to save models: %w", err)
-	}
-
-	fmt.Printf("Added new model: %s\n", newModel)
-	return nil
-}
-
-func removeModelFlow(reader *bufio.Reader) error {
-	models, mostRecent, err := loadModelsWithMostRecent()
-	if err != nil {
-		return err
-	}
-
-	fmt.Println("\nSelect model to remove:")
-	for i, m := range models {
-		mark := " "
-		if m == mostRecent {
-			mark = "*"
-		}
-		fmt.Printf("%d) %s %s\n", i+1, m, mark)
-	}
-
-	fmt.Print("Enter model number to remove: ")
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(input)
-
-	idx, err := strconv.Atoi(input)
-	if err != nil || idx < 1 || idx > len(models) {
-		return fmt.Errorf("invalid model number")
-	}
-
-	removedModel := models[idx-1]
-
-	// Update most recent if we're removing it
-	if removedModel == mostRecent {
-		if len(models) > 1 {
-			// Set most recent to another model
-			if idx == 1 && len(models) > 1 {
-				mostRecent = models[1]
-			} else {
-				mostRecent = models[0]
-			}
-		} else {
-			mostRecent = DefaultModel()
-		}
-	}
-
-	// Remove the model
-	models = append(models[:idx-1], models[idx:]...)
-
-	if len(models) == 0 {
-		models = []string{DefaultModel()}
-	}
-
-	if err := saveModelsWithMostRecent(mostRecent, models); err != nil {
-		return fmt.Errorf("failed to save models: %w", err)
-	}
-
-	fmt.Printf("Removed model: %s\n", removedModel)
-	return nil
 }

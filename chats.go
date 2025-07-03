@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -103,55 +102,6 @@ func listChats() ([]string, error) {
 	return chats, nil
 }
 
-// listFavoriteChats lists all favorite chats
-func listFavoriteChats() ([]string, error) {
-	files, err := os.ReadDir(chatsPath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read chat directory: %w", err)
-	}
-
-	var favoriteChats []string
-	for _, f := range files {
-		if !f.IsDir() && strings.HasSuffix(f.Name(), ".json") {
-			name := strings.TrimSuffix(f.Name(), ".json")
-			chatFile, err := loadChatWithMetadata(name)
-			if err == nil && chatFile.Metadata.Favorite {
-				favoriteChats = append(favoriteChats, name)
-			}
-		}
-	}
-
-	// Sort by creation date (newest first)
-	sort.Slice(favoriteChats, func(i, j int) bool {
-		chatI, _ := loadChatWithMetadata(favoriteChats[i])
-		chatJ, _ := loadChatWithMetadata(favoriteChats[j])
-		if chatI == nil || chatJ == nil {
-			return false
-		}
-		return chatI.Metadata.CreatedAt.After(chatJ.Metadata.CreatedAt)
-	})
-
-	return favoriteChats, nil
-}
-
-// loadChat loads chat file with messages and metadata
-func loadChat(name string) ([]Message, error) {
-	data, err := os.ReadFile(filepath.Join(chatsPath, name+".json"))
-	if err != nil {
-		return nil, fmt.Errorf("failed to read chat file '%s': %w", name, err)
-	}
-	var chatFile ChatFile
-	if err := json.Unmarshal(data, &chatFile); err != nil {
-		// Try loading legacy format (just messages array)
-		var messages []Message
-		if err2 := json.Unmarshal(data, &messages); err2 != nil {
-			return nil, fmt.Errorf("failed to unmarshal chat file '%s': %w", name, err)
-		}
-		return messages, nil
-	}
-	return chatFile.Messages, nil
-}
-
 // loadChatWithMetadata loads the complete chat file including metadata
 func loadChatWithMetadata(name string) (*ChatFile, error) {
 	data, err := os.ReadFile(filepath.Join(chatsPath, name+".json"))
@@ -193,163 +143,10 @@ func saveChat(name string, messages []Message) error {
 	return nil
 }
 
-// listChatsAndSummarize lists chats and prints their stored summaries
-func listChatsAndSummarize() error {
-	chats, err := listChats()
-	if err != nil {
-		return err
-	}
-	if len(chats) == 0 {
-		fmt.Println("No saved chats.")
-		return nil
-	}
-
-	for i, c := range chats {
-		chatFile, err := loadChatWithMetadata(c)
-		if err != nil {
-			fmt.Printf("%d) %s\n   (Failed to load chat: %v)\n\n", i+1, c, err)
-			continue
-		}
-
-		favoriteMark := " "
-		if chatFile.Metadata.Favorite {
-			favoriteMark = "★"
-		}
-
-		// Show title if available, otherwise show timestamp
-		displayName := c
-		if chatFile.Metadata.Title != "" {
-			displayName = chatFile.Metadata.Title
-		}
-
-		fmt.Printf("%d) %s %s\n", i+1, displayName, favoriteMark)
-
-		// Show timestamp and summary
-		if chatFile.Metadata.Title != "" {
-			fmt.Printf("   ID: %s\n", c)
-		}
-
-		summary := chatFile.Metadata.Summary
-		if summary == "" {
-			summary = "No summary available."
-		}
-		fmt.Printf("   Summary: %s\n\n", summary)
-	}
-	return nil
-}
-
-// loadAndContinueChat loads a chat by user choice and continues it
-func loadAndContinueChat(reader *bufio.Reader) error {
-	chats, err := listChats()
-	if err != nil {
-		return err
-	}
-	if len(chats) == 0 {
-		fmt.Println("No saved chats.")
-		return nil
-	}
-
-	fmt.Println("Available chats:")
-	for i, c := range chats {
-		chatFile, err := loadChatWithMetadata(c)
-		favoriteMark := " "
-		if err == nil && chatFile.Metadata.Favorite {
-			favoriteMark = "★"
-		}
-		fmt.Printf("%d) %s %s\n", i+1, c, favoriteMark)
-	}
-	fmt.Print("Enter chat number to load (or 'f' + number to toggle favorite): ")
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(input)
-
-	// Check if user wants to toggle favorite
-	if strings.HasPrefix(input, "f") {
-		favInput := strings.TrimSpace(strings.TrimPrefix(input, "f"))
-		idx, err := strconv.Atoi(favInput)
-		if err != nil || idx < 1 || idx > len(chats) {
-			return fmt.Errorf("invalid chat number")
-		}
-		chatName := chats[idx-1]
-		return toggleChatFavorite(chatName)
-	}
-
-	idx, err := strconv.Atoi(input)
-	if err != nil || idx < 1 || idx > len(chats) {
-		return fmt.Errorf("invalid chat number")
-	}
-
-	chatName := chats[idx-1]
-	chatFile, err := loadChatWithMetadata(chatName)
-	if err != nil {
-		return fmt.Errorf("failed to load chat '%s': %w", chatName, err)
-	}
-	model := chatFile.Metadata.Model
-	if model == "" {
-		model = DefaultModel()
-	}
-	fmt.Printf("Using model: %s\n", model)
-
-	// Print last message if any (not system prompt)
-	if len(chatFile.Messages) > 1 {
-		lastMsg := chatFile.Messages[len(chatFile.Messages)-1]
-		fmt.Printf("\nLast message (%s): %s\n\n", strings.Title(lastMsg.Role), lastMsg.Content)
-	}
-
-	runChat(chatName, chatFile.Messages, reader, model)
-	return nil
-}
-
 // generateTimestampChatName generates a timestamp-based chat name in ddmmyyhhss format
 func generateTimestampChatName() string {
 	now := time.Now()
 	return now.Format("2006-01-02_15-04-05") // YYYY-MM-DD_HH-MM-SS
-}
-
-// quickChatFlow creates a new chat using default model and prompt
-func quickChatFlow(reader *bufio.Reader) error {
-	chatName, err := setupNewChat(reader)
-	err = os.Setenv("OPENAI_API_KEY", "sk-")
-	if err != nil {
-		return fmt.Errorf("failed to set API key: %w", err)
-	}
-
-	// Get default model
-	_, defaultModel, err := loadModelsWithMostRecent()
-	if err != nil {
-		fmt.Println("Error loading models, using fallback default.")
-		defaultModel = DefaultModel()
-	}
-
-	// Get default prompt
-	defaultPrompt, err := getDefaultPrompt()
-	if err != nil {
-		return fmt.Errorf("failed to get default prompt: %w", err)
-	}
-
-	// Create initial message slice with system role
-	messages := []Message{
-		{Role: "system", Content: defaultPrompt.Content},
-	}
-
-	// Save the new chat with model in metadata
-	var chatFile ChatFile
-	chatFile.Messages = messages
-	chatFile.Metadata.Model = defaultModel
-	chatFile.Metadata.CreatedAt = time.Now()
-	data, err := json.MarshalIndent(chatFile, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal chat: %w", err)
-	}
-	err = os.WriteFile(filepath.Join(chatsPath, chatName+".json"), data, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to write chat file '%s': %w", chatName, err)
-	}
-
-	fmt.Printf("Starting quick chat with default model '%s' and prompt '%s'...\n\n",
-		defaultModel, defaultPrompt.Name)
-
-	runChat(chatName, messages, reader, defaultModel)
-	return nil
 }
 
 // customChatFlow creates a new chat with user-selected model and prompt
@@ -360,7 +157,12 @@ func customChatFlow(reader *bufio.Reader) error {
 	}
 
 	// Let user select model
-	model, err := promptModelAtChatStart(reader)
+	models, defaultModel, err := loadModelsWithMostRecent()
+	if err != nil {
+		fmt.Println("Error loading models, using fallback default.")
+		defaultModel = DefaultModel()
+	}
+	model, err := promptModelSelection(reader, models, defaultModel)
 	if err != nil {
 		return fmt.Errorf("failed to select model: %w", err)
 	}
@@ -394,24 +196,6 @@ func customChatFlow(reader *bufio.Reader) error {
 		model, promptName)
 
 	runChat(chatName, messages, reader, model)
-	return nil
-}
-
-// chatsMenu handles chat-related submenu options
-func chatsMenu(reader *bufio.Reader) error {
-	menu := Menu{
-		Title: "Chats Menu",
-		Items: []MenuItem{
-			{Label: "List chats", Handler: func(r *bufio.Reader) error {
-				return listChatsAndSummarize()
-			}},
-			{Label: "Load chat", Handler: loadAndContinueChat},
-			{Label: "Quick chat (use defaults)", Handler: quickChatFlow},
-			{Label: "Custom chat", Handler: customChatFlow},
-			{Label: "Back to main menu", ExitItem: true},
-		},
-	}
-	RunMenu(menu, reader)
 	return nil
 }
 
@@ -609,13 +393,6 @@ func init() {
 	}
 }
 
-// handleChatError wraps error handling for chat operations
-func handleChatError(err error, operation string) {
-	if err != nil {
-		fmt.Printf("\033[31mError during %s: %v\033[0m\n", operation, err)
-	}
-}
-
 // runChat handles the chat interaction loop
 func runChat(chatName string, messages []Message, reader *bufio.Reader, model string) {
 	// Set this as the active chat
@@ -707,41 +484,6 @@ func runChat(chatName string, messages []Message, reader *bufio.Reader, model st
 	}
 }
 
-// generateSummariesForActiveChats generates summary only for the active chat
-func generateSummariesForActiveChats() error {
-	if activeChatName == "" {
-		// No active chat, nothing to do
-		return nil
-	}
-
-	chatFile, err := loadChatWithMetadata(activeChatName)
-	if err != nil {
-		return fmt.Errorf("failed to load active chat '%s': %w", activeChatName, err)
-	}
-
-	// Generate summary if not present and chat has messages
-	if chatFile.Metadata.Summary == "" && len(chatFile.Messages) > 1 {
-		fmt.Printf("Generating summary for active chat '%s'...\n", activeChatName)
-		model := chatFile.Metadata.Model
-		if model == "" {
-			model = DefaultModel()
-		}
-		summary := generateChatSummary(chatFile.Messages, model)
-		chatFile.Metadata.Summary = summary
-
-		// Save the updated chat file
-		data, err := json.MarshalIndent(chatFile, "", "  ")
-		if err != nil {
-			return fmt.Errorf("failed to marshal active chat '%s': %w", activeChatName, err)
-		}
-		if err := os.WriteFile(filepath.Join(chatsPath, activeChatName+".json"), data, 0644); err != nil {
-			return fmt.Errorf("failed to save active chat '%s': %w", activeChatName, err)
-		}
-		fmt.Printf("Summary generated and saved for active chat '%s'\n", activeChatName)
-	}
-	return nil
-}
-
 // toggleChatFavorite toggles the favorite status of a chat
 func toggleChatFavorite(chatName string) error {
 	chatFile, err := loadChatWithMetadata(chatName)
@@ -765,176 +507,6 @@ func toggleChatFavorite(chatName string) error {
 		status = "unfavorited"
 	}
 	fmt.Printf("Chat '%s' %s.\n", chatName, status)
-	return nil
-}
-
-// loadFavoriteChat loads a favorite chat by user choice
-func loadFavoriteChat(reader *bufio.Reader) error {
-	favoriteChats, err := listFavoriteChats()
-	if err != nil {
-		return err
-	}
-	if len(favoriteChats) == 0 {
-		fmt.Println("No favorite chats found.")
-		return nil
-	}
-
-	fmt.Println("Favorite chats:")
-	for i, c := range favoriteChats {
-		fmt.Printf("%d) %s\n", i+1, c)
-	}
-	fmt.Print("Enter chat number to load: ")
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(input)
-
-	idx, err := strconv.Atoi(input)
-	if err != nil || idx < 1 || idx > len(favoriteChats) {
-		return fmt.Errorf("invalid chat number")
-	}
-
-	chatName := favoriteChats[idx-1]
-	chatFile, err := loadChatWithMetadata(chatName)
-	if err != nil {
-		return fmt.Errorf("failed to load chat '%s': %w", chatName, err)
-	}
-	model := chatFile.Metadata.Model
-	if model == "" {
-		model = DefaultModel()
-	}
-	fmt.Printf("Using model: %s\n", model)
-
-	// Print last message if any (not system prompt)
-	if len(chatFile.Messages) > 1 {
-		lastMsg := chatFile.Messages[len(chatFile.Messages)-1]
-		fmt.Printf("\nLast message (%s): %s\n\n", strings.Title(lastMsg.Role), lastMsg.Content)
-	}
-
-	runChat(chatName, chatFile.Messages, reader, model)
-	return nil
-}
-
-// favoritesMenu handles favorite chat-related submenu options
-func favoritesMenu(reader *bufio.Reader) error {
-	menu := Menu{
-		Title: "Favorites Menu",
-		Items: []MenuItem{
-			{Label: "List favorite chats", Handler: func(r *bufio.Reader) error {
-				favoriteChats, err := listFavoriteChats()
-				if err != nil {
-					return err
-				}
-				if len(favoriteChats) == 0 {
-					fmt.Println("No favorite chats found.")
-					return nil
-				}
-
-				fmt.Println("Favorite chats:")
-				for i, c := range favoriteChats {
-					chatFile, err := loadChatWithMetadata(c)
-					if err != nil {
-						fmt.Printf("%d) %s (Failed to load: %v)\n", i+1, c, err)
-						continue
-					}
-					summary := chatFile.Metadata.Summary
-					if summary == "" {
-						summary = "No summary available."
-					}
-					fmt.Printf("%d) %s\n   Summary: %s\n\n", i+1, c, summary)
-				}
-				return nil
-			}},
-			{Label: "Load favorite chat", Handler: loadFavoriteChat},
-			{Label: "Load favorite chat in GUI", Handler: func(r *bufio.Reader) error {
-				favoriteChats, err := listFavoriteChats()
-				if err != nil {
-					return err
-				}
-				if len(favoriteChats) == 0 {
-					fmt.Println("No favorite chats found.")
-					return nil
-				}
-
-				fmt.Println("Favorite chats:")
-				for i, c := range favoriteChats {
-					fmt.Printf("%d) %s\n", i+1, c)
-				}
-				fmt.Print("Enter chat number to load in GUI: ")
-				input, _ := r.ReadString('\n')
-				input = strings.TrimSpace(input)
-
-				idx, err := strconv.Atoi(input)
-				if err != nil || idx < 1 || idx > len(favoriteChats) {
-					return fmt.Errorf("invalid chat number")
-				}
-
-				chatName := favoriteChats[idx-1]
-				chatFile, err := loadChatWithMetadata(chatName)
-				if err != nil {
-					return fmt.Errorf("failed to load chat '%s': %w", chatName, err)
-				}
-				model := chatFile.Metadata.Model
-				if model == "" {
-					model = DefaultModel()
-				}
-				fmt.Printf("Loading favorite chat '%s' with model '%s' in GUI...\n", chatName, model)
-
-				runChatGUI(chatName, chatFile.Messages, r, model)
-				return nil
-			}},
-			{Label: "Add favorite", Handler: func(r *bufio.Reader) error {
-				allChats, err := listChats()
-				if err != nil {
-					return err
-				}
-				var nonFavChats []string
-				for _, c := range allChats {
-					chatFile, err := loadChatWithMetadata(c)
-					if err == nil && !chatFile.Metadata.Favorite {
-						nonFavChats = append(nonFavChats, c)
-					}
-				}
-				if len(nonFavChats) == 0 {
-					fmt.Println("No non-favorite chats available to add.")
-					return nil
-				}
-				fmt.Println("Non-favorite chats:")
-				for i, c := range nonFavChats {
-					fmt.Printf("%d) %s\n", i+1, c)
-				}
-				fmt.Print("Enter number to add to favorites, or 0 to return: ")
-				input, _ := r.ReadString('\n')
-				input = strings.TrimSpace(input)
-				idx, err := strconv.Atoi(input)
-				if err != nil || idx < 0 || idx > len(nonFavChats) {
-					fmt.Println("Invalid selection.")
-					return nil
-				}
-				if idx == 0 {
-					return nil
-				}
-				chatName := nonFavChats[idx-1]
-				chatFile, err := loadChatWithMetadata(chatName)
-				if err != nil {
-					fmt.Printf("Failed to load chat '%s': %v\n", chatName, err)
-					return nil
-				}
-				chatFile.Metadata.Favorite = true
-				data, err := json.MarshalIndent(chatFile, "", "  ")
-				if err != nil {
-					fmt.Printf("Failed to marshal chat '%s': %v\n", chatName, err)
-					return nil
-				}
-				if err := os.WriteFile(filepath.Join(chatsPath, chatName+".json"), data, 0644); err != nil {
-					fmt.Printf("Failed to save chat '%s': %v\n", chatName, err)
-					return nil
-				}
-				fmt.Printf("Chat '%s' added to favorites.\n", chatName)
-				return nil
-			}},
-			{Label: "Back to main menu", ExitItem: true},
-		},
-	}
-	RunMenu(menu, reader)
 	return nil
 }
 
@@ -977,103 +549,6 @@ func readMultiLineInput(reader *bufio.Reader) string {
 	return result
 }
 
-// guiChatMenu handles GUI chat-related submenu options
-func guiChatMenu(reader *bufio.Reader) error {
-	menu := Menu{
-		Title: "GUI Chat Menu",
-		Items: []MenuItem{
-			{Label: "Load chat in GUI", Handler: func(r *bufio.Reader) error {
-				chats, err := listChats()
-				if err != nil {
-					return err
-				}
-				if len(chats) == 0 {
-					fmt.Println("No saved chats.")
-					return nil
-				}
-
-				fmt.Println("Available chats:")
-				for i, c := range chats {
-					chatFile, err := loadChatWithMetadata(c)
-					favoriteMark := " "
-					if err == nil && chatFile.Metadata.Favorite {
-						favoriteMark = "★"
-					}
-					fmt.Printf("%d) %s %s\n", i+1, c, favoriteMark)
-				}
-				fmt.Print("Enter chat number to load in GUI: ")
-				input, _ := r.ReadString('\n')
-				input = strings.TrimSpace(input)
-
-				idx, err := strconv.Atoi(input)
-				if err != nil || idx < 1 || idx > len(chats) {
-					return fmt.Errorf("invalid chat number")
-				}
-
-				chatName := chats[idx-1]
-				chatFile, err := loadChatWithMetadata(chatName)
-				if err != nil {
-					return fmt.Errorf("failed to load chat '%s': %w", chatName, err)
-				}
-				model := chatFile.Metadata.Model
-				if model == "" {
-					model = DefaultModel()
-				}
-				fmt.Printf("Loading chat '%s' with model '%s' in GUI...\n", chatName, model)
-
-				runChatGUI(chatName, chatFile.Messages, r, model)
-				return nil
-			}},
-			{Label: "New GUI chat", Handler: func(r *bufio.Reader) error {
-				chatName, err := setupNewChat(r)
-				if err != nil {
-					return err
-				}
-
-				// Let user select model
-				model, err := promptModelAtChatStart(r)
-				if err != nil {
-					return fmt.Errorf("failed to select model: %w", err)
-				}
-
-				// Let user select prompt
-				promptName, promptContent, err := promptPromptSelection(r)
-				if err != nil {
-					return fmt.Errorf("failed to select prompt: %w", err)
-				}
-
-				// Create initial message slice with system role
-				messages := []Message{
-					{Role: "system", Content: promptContent},
-				}
-
-				// Save the new chat with model in metadata
-				var chatFile ChatFile
-				chatFile.Messages = messages
-				chatFile.Metadata.Model = model
-				chatFile.Metadata.CreatedAt = time.Now()
-				data, err := json.MarshalIndent(chatFile, "", "  ")
-				if err != nil {
-					return fmt.Errorf("failed to marshal chat: %w", err)
-				}
-				err = os.WriteFile(filepath.Join(chatsPath, chatName+".json"), data, 0644)
-				if err != nil {
-					return fmt.Errorf("failed to write chat file '%s': %w", chatName, err)
-				}
-
-				fmt.Printf("Starting new GUI chat with model '%s' and prompt '%s'...\n",
-					model, promptName)
-
-				runChatGUI(chatName, messages, r, model)
-				return nil
-			}},
-			{Label: "Back to main menu", ExitItem: true},
-		},
-	}
-	RunMenu(menu, reader)
-	return nil
-}
-
 // setChatTitle sets the title for a chat
 func setChatTitle(chatName string, title string) error {
 	chatFile, err := loadChatWithMetadata(chatName)
@@ -1096,44 +571,29 @@ func setChatTitle(chatName string, title string) error {
 	return nil
 }
 
-// getChatTitle gets the title for a chat, returns empty string if no title
-func getChatTitle(chatName string) string {
-	chatFile, err := loadChatWithMetadata(chatName)
-	if err != nil {
-		return ""
+// promptModelSelection prompts the user to select a model from the list, defaulting to defaultModel if input is empty or invalid.
+func promptModelSelection(reader *bufio.Reader, models []string, defaultModel string) (string, error) {
+	fmt.Println("\nSelect model for this chat:")
+	for i, model := range models {
+		mark := " "
+		if model == defaultModel {
+			mark = "*"
+		}
+		fmt.Printf("%d) %s %s\n", i+1, model, mark)
 	}
-	return chatFile.Metadata.Title
-}
+	fmt.Printf("Enter model number (or press Enter for default '%s'): ", defaultModel)
+	input, _ := reader.ReadString('\n')
+	input = strings.TrimSpace(input)
 
-// generateChatTitle generates a title for the chat using AI
-func generateChatTitle(messages []Message, model string) string {
-	if len(messages) == 0 {
-		return "Empty chat"
-	}
-
-	// Create prompt for title generation
-	titlePrompt := Message{
-		Role:    "user",
-		Content: "Please provide an accurate title for this chat so that it can be easily recognized from a list of archived chats. Keep it concise (under 50 characters) and descriptive.",
-	}
-	titleMessages := append(messages, titlePrompt)
-
-	// Temporarily redirect stdout to /dev/null during title generation
-	savedStdout := os.Stdout
-	os.Stdout = nil
-
-	title, err := streamChatResponse(titleMessages, model)
-
-	// Restore stdout
-	os.Stdout = savedStdout
-
-	if err != nil {
-		return fmt.Sprintf("Chat with %d messages", len(messages))
+	if input == "" {
+		return defaultModel, nil
 	}
 
-	// Clean up the title (remove quotes, extra whitespace, etc.)
-	title = strings.TrimSpace(title)
-	title = strings.Trim(title, `"'`)
+	var choice int
+	if _, err := fmt.Sscanf(input, "%d", &choice); err != nil || choice < 1 || choice > len(models) {
+		fmt.Println("Invalid input; using default model.")
+		return defaultModel, nil
+	}
 
-	return title
+	return models[choice-1], nil
 }
