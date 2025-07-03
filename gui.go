@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/common-nighthawk/go-figure"
@@ -110,34 +111,35 @@ func (g *ChatGUI) generateTitleWithAPI() {
 
 // handleVimCommand processes vim-like commands
 func (g *ChatGUI) handleVimCommand(cmd string) bool {
-	switch cmd {
-	case ":g":
-		// Generate new title for chat using API
+	switch {
+	case cmd == ":g":
 		g.generateTitleWithAPI()
 		return true
-	case ":f":
-		// Toggle favorite status
+	case cmd == ":f":
 		chatFile, err := loadChatWithMetadata(g.chatName)
 		if err == nil {
 			chatFile.Metadata.Favorite = !chatFile.Metadata.Favorite
-			// Save the updated metadata by saving the entire chat
 			if err := saveChat(g.chatName, chatFile.Messages); err == nil {
-				// Success - status will be shown in the UI
+				// Success
 			}
 		}
 		return true
-	case ":q":
-		// Save and quit
+	case cmd == ":q":
 		if err := saveChat(g.chatName, g.messages); err == nil {
 			return false // Exit
 		}
 		return true
-	case ":h":
-		// g.showHelp = true // REMOVE this line, ChatGUI does not have showHelp
-		// Instead, handle help popup in ChatModel only
+	case cmd == ":h":
+		// Show help popup in ChatModel only
+		return true
+	case strings.HasPrefix(cmd, ":t "):
+		title := strings.TrimSpace(strings.TrimPrefix(cmd, ":t "))
+		if title != "" {
+			_ = setChatTitle(g.chatName, title)
+		}
 		return true
 	default:
-		return false // Not a vim command, treat as regular input
+		return false
 	}
 }
 
@@ -406,6 +408,10 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.showConfirm {
+			// Already showing confirm, ignore other keys
+			return m, nil
+		}
 		// Typable key wakeup logic
 		if m.inputBuffer == "" && len(msg.String()) == 1 && msg.Type == tea.KeyRunes && !m.loading {
 			m.inputBuffer = msg.String()
@@ -421,8 +427,25 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		switch msg.String() {
 		case "ctrl+c":
-			m.quitting = true
-			return m, tea.Quit
+			if m.loading {
+				if m.stopChan != nil {
+					close(m.stopChan)
+				}
+				// Restore last user message to input
+				if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "user" {
+					m.inputBuffer = m.messages[len(m.messages)-1].Content
+					m.cursorPos = len(m.inputBuffer)
+					m.messages = m.messages[:len(m.messages)-1]
+					// Save after removing the unsent user message
+					_ = saveChat(m.chatName, m.messages)
+				}
+				m.loading = false
+				m.status = "Request cancelled"
+				return m, nil
+			} else if m.inputBuffer != "" {
+				safe := strings.ReplaceAll(m.inputBuffer, "\x00", "")
+				clipboard.WriteAll(safe)
+			}
 		case "ctrl+s":
 			if m.loading {
 				if m.stopChan != nil {
@@ -439,6 +462,22 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		case "esc":
+			if m.loading {
+				if m.stopChan != nil {
+					close(m.stopChan)
+				}
+				// Restore last user message to input
+				if len(m.messages) > 0 && m.messages[len(m.messages)-1].Role == "user" {
+					m.inputBuffer = m.messages[len(m.messages)-1].Content
+					m.cursorPos = len(m.inputBuffer)
+					m.messages = m.messages[:len(m.messages)-1]
+					// Save after removing the unsent user message
+					_ = saveChat(m.chatName, m.messages)
+				}
+				m.loading = false
+				m.status = "Request cancelled"
+				return m, nil
+			}
 			if m.showConfirm && !m.confirmingExit {
 				// Start confirmation dialog
 				m.confirmingExit = true
@@ -491,6 +530,10 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 				m.messages = append(m.messages, Message{Role: "user", Content: m.inputBuffer})
+				// Save after user message is appended
+				if err := saveChat(m.chatName, m.messages); err != nil {
+					m.status = fmt.Sprintf("Save error: %v", err)
+				}
 				m.inputBuffer = ""
 				m.loading = true
 				m.status = "Waiting for AI response..."
@@ -552,6 +595,19 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.quitting = true
 				return m, tea.Quit
+			}
+		case "ctrl+x":
+			if m.inputBuffer != "" && m.cursorPos > 0 {
+				safe := strings.ReplaceAll(m.inputBuffer, "\x00", "")
+				clipboard.WriteAll(safe)
+				m.inputBuffer = ""
+				m.cursorPos = 0
+			}
+		case "ctrl+v":
+			paste, err := clipboard.ReadAll()
+			if err == nil {
+				m.inputBuffer = m.inputBuffer[:m.cursorPos] + paste + m.inputBuffer[m.cursorPos:]
+				m.cursorPos += len(paste)
 			}
 		}
 	case tea.WindowSizeMsg:
@@ -616,7 +672,7 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		confirmModel := YesNoModel{
 			title:    "Confirm End Chat",
 			prompt:   "Are you sure you want to end the chat?",
-			selected: 0,
+			selected: 1, // default No
 		}
 		p := tea.NewProgram(confirmModel, tea.WithAltScreen())
 		finalModel, _ := p.Run()
@@ -625,19 +681,54 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			result = confirm.result
 		}
 		return m, func() tea.Msg { return yesNoResultMsg{result} }
+	case tea.MouseMsg:
+		if !m.loading && m.inputBuffer == "" {
+			chatBoxHeight := m.height - 1 - 1 - 3 - 2 // header, status, input, spacing
+			if chatBoxHeight < 1 {
+				chatBoxHeight = 1
+			}
+			switch msg.Type {
+			case tea.MouseWheelUp:
+				m.scrollPos = max(0, m.scrollPos-chatBoxHeight)
+				m.autoScroll = false
+			case tea.MouseWheelDown:
+				maxScroll := max(0, len(m.getVisibleMessages())-chatBoxHeight)
+				m.scrollPos = min(maxScroll, m.scrollPos+chatBoxHeight)
+				m.autoScroll = false
+			}
+		}
+		return m, nil
 	}
 	return m, nil
+}
+
+func renderScrollBar(total, visible, scrollPos, height int) string {
+	if total <= visible || height <= 0 {
+		return strings.Repeat("│\n", height)
+	}
+	thumbHeight := max(1, height*visible/total)
+	thumbPos := min(height-thumbHeight, height*scrollPos/total)
+	var bar strings.Builder
+	for i := 0; i < height; i++ {
+		if i >= thumbPos && i < thumbPos+thumbHeight {
+			// Thumb: colored block
+			bar.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("203")).Render("█") + "\n")
+		} else {
+			bar.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render("│") + "\n")
+		}
+	}
+	return bar.String()
 }
 
 func (m ChatModel) View() string {
 	if m.quitting {
 		return "Chat saved. Goodbye!\n"
 	}
-	if m.confirmingExit {
+	if m.showConfirm {
 		confirmModel := YesNoModel{
 			title:    "Confirm End Chat",
-			prompt:   "Are you sure you want to end the chat?",
-			selected: 0,
+			prompt:   "Are you sure you want to quit?",
+			selected: 1, // default No
 		}
 		return confirmModel.View()
 	}
@@ -652,6 +743,10 @@ func (m ChatModel) View() string {
 	// Box styles with borders
 	chatBoxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
+		BorderTop(true).
+		BorderRight(true).
+		BorderLeft(false).
+		BorderBottom(false).
 		BorderForeground(lipgloss.Color("62")).
 		Padding(0, 1)
 
@@ -730,9 +825,9 @@ func (m ChatModel) View() string {
 			lines := strings.Split(wrappedContent, "\n")
 			var boxStyle lipgloss.Style
 			if msg.Role == "user" {
-				boxStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("203")).Padding(1, 2).Margin(1, 0)
+				boxStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("203")).Padding(0, 1).Margin(0, 0)
 			} else {
-				boxStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("39")).Padding(1, 2).Margin(1, 0)
+				boxStyle = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("39")).Padding(0, 1).Margin(0, 0)
 			}
 			if msg.Role == "user" {
 				messageText = userStyle.Render("You:") + "\n" + strings.Join(lines, "\n")
@@ -781,13 +876,30 @@ func (m ChatModel) View() string {
 		chatContent = "No messages yet..."
 	}
 
-	// Create chat box with border
-	chatBox := chatBoxStyle.Width(m.width - 2).Height(chatBoxHeight).Render(chatContent)
+	// --- Scroll bar integration ---
+	chatBoxLines := strings.Split(chatContent, "\n")
+	scrollBar := renderScrollBar(len(visibleMessages), chatBoxHeight, m.scrollPos, chatBoxHeight)
+	scrollBarLines := strings.Split(scrollBar, "\n")
+	var chatWithBar []string
+	for i := 0; i < chatBoxHeight; i++ {
+		line := ""
+		if i < len(chatBoxLines) {
+			line = chatBoxLines[i]
+		}
+		bar := ""
+		if i < len(scrollBarLines) {
+			bar = scrollBarLines[i]
+		}
+		// Pad or trim line to fit width-3 (leaving space for scroll bar)
+		line = lipgloss.NewStyle().Width(m.width - 4).Render(line)
+		chatWithBar = append(chatWithBar, line+bar)
+	}
+	chatBox := chatBoxStyle.Width(m.width - 1).Height(chatBoxHeight).Render(strings.Join(chatWithBar, "\n"))
 
 	// Input area - always 3 lines tall at bottom
 	inputText := "Input: "
 	if m.inputBuffer == "" {
-		inputText = "*waiting for input...*\n\n:h for help"
+		inputText = "*waiting for input...*\n(Ctrl+C or Esc to cancel sending)\n:h for help"
 	} else {
 		inputRunes := []rune(m.inputBuffer)
 		cursor := "|"
@@ -808,6 +920,11 @@ func (m ChatModel) View() string {
 		lines = append(lines, "")
 	}
 	inputText = strings.Join(lines[:3], "\n")
+
+	// If loading, show spinner and 'Waiting for response...' in input box
+	if m.loading {
+		inputText = getSpinnerChar(m.spinner) + " Waiting for response...\n(Ctrl+C or Esc to cancel sending)\n"
+	}
 
 	// Create input box with border
 	inputBox := inputBoxStyle.Width(m.width - 2).Height(3).Render(inputText)
@@ -841,14 +958,15 @@ func (m ChatModel) View() string {
 	}
 
 	if m.showHelp {
-		helpStyle := lipgloss.NewStyle().
+		helpText := "Vim Commands:\n:g  Generate title\n:t \"title\"  Set title\n:f  Favorite\n:q  Quit\n:h  Help\n\nChat Scroll:\nShift+Up/Down, PgUp/PgDn  Scroll chat\nHome/End  Move cursor\nLeft/Right  Move cursor"
+		helpBox := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("39")).
 			Padding(1, 2).
 			Background(lipgloss.Color("236")).
-			Foreground(lipgloss.Color("252"))
-		helpText := "Vim Commands:\n:g  Generate title\n:t \"title\"  Set title\n:f  Favorite\n:q  Quit\n:h  Help\n\nChat Scroll:\nShift+Up/Down, PgUp/PgDn  Scroll chat\nHome/End  Move cursor\nLeft/Right  Move cursor"
-		helpBox := helpStyle.Width(m.width - 10).Render(helpText + "\n\nESC to close")
+			Foreground(lipgloss.Color("252")).
+			Width(m.width - 10).
+			Render(helpText + "\n\nESC to close")
 		centeredHelp := lipgloss.NewStyle().Margin((m.height-7)/2, (m.width-lipgloss.Width(helpBox))/2).Render(helpBox)
 		return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(centeredHelp)
 	}
@@ -880,13 +998,24 @@ func (g *ChatGUI) Run() error {
 		quitting:    false,
 		showConfirm: false,
 	}
+	// Set scroll position to bottom
+	visibleMsgs := model.getVisibleMessages()
+	chatBoxHeight := model.height - 1 - 1 - 3 - 2 // header, status, input, spacing
+	if chatBoxHeight < 1 {
+		chatBoxHeight = 1
+	}
+	model.scrollPos = max(0, len(visibleMsgs)-chatBoxHeight)
+	model.autoScroll = true
 
 	// Run the program
 	p := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
-	if _, err := p.Run(); err != nil {
+	finalModel, err := p.Run()
+	if err != nil {
 		return fmt.Errorf("failed to run program: %w", err)
 	}
-
+	if chatModel, ok := finalModel.(ChatModel); ok && chatModel.quitting {
+		return ErrMenuBack
+	}
 	return nil
 }
 
@@ -918,11 +1047,17 @@ func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			m.quitting = true
+			m.selected = -1 // signal exit app
 			return m, tea.Quit
 		case "esc":
 			m.quitting = true
+			m.selected = -2 // signal back
+			return m, tea.Quit
+		case "q":
+			m.quitting = true
+			m.selected = -2 // treat 'q' as back
 			return m, tea.Quit
 		case "up", "k":
 			if m.selected > 0 {
@@ -948,52 +1083,6 @@ func (m MenuModel) View() string {
 	}
 
 	asciiArt := figure.NewFigure("AI CHAT", "", true).String()
-	asciiWidth := lipgloss.Width(strings.Split(asciiArt, "\n")[0])
-
-	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63")).Align(lipgloss.Center)
-	// Custom selected style: only top and bottom border, no vertical lines
-	customSelected := func(option string) string {
-		// Use golden ratio (0.618) of asciiWidth for the border width
-		borderWidth := int(float64(asciiWidth) * 0.618)
-		if borderWidth < 10 {
-			borderWidth = 10
-		}
-		content := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true).Width(borderWidth).Align(lipgloss.Center).Render(option)
-		borderColor := lipgloss.Color("203")
-		top := lipgloss.NewStyle().Foreground(borderColor).Render("╭" + strings.Repeat("─", borderWidth) + "╮")
-		bottom := lipgloss.NewStyle().Foreground(borderColor).Render("╰" + strings.Repeat("─", borderWidth) + "╯")
-		return top + "\n" + content + "\n" + bottom
-	}
-	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(false)
-	menuBoxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("63")).
-		Width(asciiWidth).
-		Align(lipgloss.Center).
-		Padding(1, 4)
-	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Align(lipgloss.Right).Width(asciiWidth)
-
-	var options []string
-	for i, option := range m.options {
-		var rendered string
-		if i == m.selected {
-			rendered = customSelected(option)
-		} else {
-			rendered = normalStyle.Render(option)
-		}
-		aligned := lipgloss.PlaceHorizontal(asciiWidth, lipgloss.Right, rendered)
-		options = append(options, aligned)
-	}
-	menuOptions := strings.Join(options, "\n")
-
-	menuBox := menuBoxStyle.Render(menuOptions)
-	title := titleStyle.Width(asciiWidth).Render(m.title)
-	help := helpStyle.Render("Controls: ↑↓ to navigate, Enter to select, Esc to go back, Ctrl+C to quit")
-
-	// Compose the full menu: ASCII art, title, menu box, help text (help directly under box)
-	menuBlock := lipgloss.JoinVertical(lipgloss.Center, asciiArt, title, menuBox, help)
-
-	// Center the menu block in the terminal
 	w := m.width
 	h := m.height
 	if w <= 0 {
@@ -1002,6 +1091,54 @@ func (m MenuModel) View() string {
 	if h <= 0 {
 		h = 24
 	}
+	parentBoxWidth := int(float64(w) * 0.618)
+	if parentBoxWidth < 30 {
+		parentBoxWidth = 30
+	}
+
+	titleStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63")).Align(lipgloss.Center)
+	customSelected := func(option string) string {
+		borderWidth := parentBoxWidth - 4 // 2 for each side border
+		if borderWidth < 10 {
+			borderWidth = 10
+		}
+		content := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(true).Width(borderWidth).Align(lipgloss.Center).Render(option)
+		borderColor := lipgloss.Color("203")
+		top := lipgloss.NewStyle().Foreground(borderColor).Render("╭" + strings.Repeat("─", borderWidth) + "╮")
+		bottom := lipgloss.NewStyle().Foreground(borderColor).Render("╰" + strings.Repeat("─", borderWidth) + "╯")
+		// No extra blank lines, just top, content, bottom
+		box := top + "\n" + content + "\n" + bottom
+		return lipgloss.PlaceHorizontal(parentBoxWidth, lipgloss.Center, box)
+	}
+	normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(false).Width(parentBoxWidth).Align(lipgloss.Center)
+	menuBoxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("63")).
+		Width(parentBoxWidth)
+
+	var options []string
+	for i, option := range m.options {
+		var rendered string
+		if i == m.selected {
+			rendered = customSelected(option)
+			options = append(options, rendered)
+		} else {
+			rendered = normalStyle.Render(option)
+			options = append(options, rendered)
+		}
+	}
+	// Vertically center the options block in the parent box
+	optionsBlock := strings.Join(options, "\n")
+	maxOptions := len(m.options) * 3 // Each highlighted option is 3 lines, normal is 1, but this is safe upper bound
+	optionsBlock = lipgloss.PlaceVertical(maxOptions, lipgloss.Center, optionsBlock)
+
+	menuBox := menuBoxStyle.Render(optionsBlock)
+	title := titleStyle.Width(parentBoxWidth).Render(m.title)
+
+	controlsText := "Controls: ↑↓ to navigate, Enter to select, Esc to go back, Ctrl+C to quit"
+	controls := lipgloss.NewStyle().Align(lipgloss.Center).Render(controlsText)
+
+	menuBlock := lipgloss.JoinVertical(lipgloss.Center, asciiArt, title, menuBox, controls)
 	centeredMenu := lipgloss.NewStyle().Width(w).Height(h).Align(lipgloss.Center, lipgloss.Center).Render(menuBlock)
 	return centeredMenu
 }
@@ -1012,7 +1149,6 @@ type triggerConfirmMsg struct{}
 
 func RunGUIMainMenu() error {
 	var width, height int
-	// Start with zero; Bubble Tea will update via WindowSizeMsg
 	width, height = 0, 0
 	mainMenuOptions := []string{"Chats", "Favorites", "Prompts", "Models", "API Key", "Help", "Exit"}
 	for {
@@ -1032,47 +1168,92 @@ func RunGUIMainMenu() error {
 		menuModel := finalModel.(MenuModel)
 		width = menuModel.width
 		height = menuModel.height
-		if menuModel.quitting || menuModel.selected == len(mainMenuOptions)-1 {
+		if menuModel.selected == -1 || menuModel.selected == len(mainMenuOptions)-1 {
 			return nil
+		}
+		if menuModel.selected == -2 {
+			return ErrMenuBack
 		}
 		switch mainMenuOptions[menuModel.selected] {
 		case "Chats":
 			if err := GUIMenuChats(); err != nil {
+				if err == ErrMenuBack {
+					continue
+				}
 				return err
 			}
 		case "Favorites":
 			if err := GUIMenuFavorites(); err != nil {
+				if err == ErrMenuBack {
+					continue
+				}
 				return err
 			}
 		case "Prompts":
 			if err := GUIMenuPrompts(); err != nil {
+				if err == ErrMenuBack {
+					continue
+				}
 				return err
 			}
 		case "Models":
 			if err := GUIMenuModels(); err != nil {
+				if err == ErrMenuBack {
+					continue
+				}
 				return err
 			}
 		case "API Key":
 			if err := GUIMenuAPIKey(); err != nil {
+				if err == ErrMenuBack {
+					continue
+				}
 				return err
 			}
 		case "Help":
 			if err := GUIShowHelp(); err != nil {
+				if err == ErrMenuBack {
+					continue
+				}
 				return err
 			}
 		}
-		// After returning from a submenu, show the main menu again
 	}
 }
 
 // Add missing methods and functions for ChatModel
 func (m ChatModel) getVisibleMessages() []Message {
-	return m.messages
+	msgs := m.messages
+	if len(msgs) > 0 && msgs[0].Role == "system" {
+		return msgs[1:]
+	}
+	return msgs
 }
 
 func (m *ChatModel) handleVimCommand(cmd string) bool {
-	// Minimal stub, implement as needed
-	return false
+	switch {
+	case cmd == ":g":
+		m.generatingTitle = true
+		return true
+	case cmd == ":f":
+		_ = toggleChatFavorite(m.chatName)
+		return true
+	case cmd == ":q":
+		m.quitting = true
+		return false // Exit
+	case cmd == ":h":
+		m.showHelp = true
+		return true
+	case strings.HasPrefix(cmd, ":t "):
+		title := strings.TrimSpace(strings.TrimPrefix(cmd, ":t "))
+		if title != "" {
+			_ = setChatTitle(m.chatName, title)
+			m.status = "Title set: " + title
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 // --- Submenu implementations ---
@@ -1103,7 +1284,7 @@ func selectFromList(title string, items []string) (int, error) {
 }
 
 func GUIMenuChats() error {
-	chatMenuOptions := []string{"List Chats", "Add New Chat", "Custom Chat", "Continue Chat", "Back"}
+	chatMenuOptions := []string{"List Chats", "Add New Chat", "Custom Chat", "Load Chat", "Back"}
 	for {
 		model := MenuModel{
 			title:    "Chats",
@@ -1119,6 +1300,12 @@ func GUIMenuChats() error {
 			return err
 		}
 		menuModel := finalModel.(MenuModel)
+		if menuModel.selected == -1 {
+			return ErrMenuBack
+		}
+		if menuModel.selected == -2 || menuModel.selected == 4 {
+			return ErrMenuBack
+		}
 		switch menuModel.selected {
 		case 0: // List Chats
 			chats, err := listChats()
@@ -1128,17 +1315,29 @@ func GUIMenuChats() error {
 			if len(chats) == 0 {
 				return nil
 			}
+			// Add star to favorites
+			for i, c := range chats {
+				chatFile, err := loadChatWithMetadata(c)
+				if err == nil && chatFile.Metadata.Favorite {
+					chats[i] = "★ " + c
+				}
+			}
 			idx, err := selectFromList("Select Chat to View/Continue", chats)
 			if err != nil || idx < 0 || idx >= len(chats) {
 				continue
 			}
-			chatFile, err := loadChatWithMetadata(chats[idx])
+			// Remove star for loading
+			chatName := strings.TrimPrefix(chats[idx], "★ ")
+			chatFile, err := loadChatWithMetadata(chatName)
 			if err != nil {
 				return err
 			}
 			reader := bufio.NewReader(os.Stdin)
-			gui := NewChatGUI(chats[idx], chatFile.Messages, chatFile.Metadata.Model, reader)
+			gui := NewChatGUI(chatName, chatFile.Messages, chatFile.Metadata.Model, reader)
 			if err := gui.Run(); err != nil {
+				if err == ErrMenuBack {
+					continue
+				}
 				return err
 			}
 		case 1: // Add New Chat
@@ -1158,11 +1357,10 @@ func GUIMenuChats() error {
 				return err
 			}
 		case 2: // Custom Chat
-			reader := bufio.NewReader(os.Stdin)
-			if err := customChatFlow(reader); err != nil {
+			if err := GUICustomChatFlow(); err != nil {
 				return err
 			}
-		case 3: // Continue Chat
+		case 3: // Load Chat
 			chats, err := listChats()
 			if err != nil {
 				return err
@@ -1170,21 +1368,32 @@ func GUIMenuChats() error {
 			if len(chats) == 0 {
 				return nil
 			}
-			idx, err := selectFromList("Select Chat to Continue", chats)
+			// Add star to favorites
+			for i, c := range chats {
+				chatFile, err := loadChatWithMetadata(c)
+				if err == nil && chatFile.Metadata.Favorite {
+					chats[i] = "★ " + c
+				}
+			}
+			idx, err := selectFromList("Select Chat to Load", chats)
 			if err != nil || idx < 0 || idx >= len(chats) {
 				continue
 			}
-			chatFile, err := loadChatWithMetadata(chats[idx])
+			chatName := strings.TrimPrefix(chats[idx], "★ ")
+			chatFile, err := loadChatWithMetadata(chatName)
 			if err != nil {
 				return err
 			}
 			reader := bufio.NewReader(os.Stdin)
-			gui := NewChatGUI(chats[idx], chatFile.Messages, chatFile.Metadata.Model, reader)
+			gui := NewChatGUI(chatName, chatFile.Messages, chatFile.Metadata.Model, reader)
 			if err := gui.Run(); err != nil {
+				if err == ErrMenuBack {
+					continue
+				}
 				return err
 			}
 		case 4: // Back
-			return nil
+			return ErrMenuBack
 		}
 	}
 }
@@ -1206,9 +1415,14 @@ func GUIMenuFavorites() error {
 			return err
 		}
 		menuModel := finalModel.(MenuModel)
+		if menuModel.selected == -1 {
+			return ErrMenuBack
+		}
+		if menuModel.selected == -2 || menuModel.selected == 3 {
+			return ErrMenuBack
+		}
 		switch menuModel.selected {
 		case 0: // List Favorites
-			// List all favorite chats and allow opening
 			chats, err := listChats()
 			if err != nil {
 				return err
@@ -1217,23 +1431,27 @@ func GUIMenuFavorites() error {
 			for _, c := range chats {
 				chatFile, err := loadChatWithMetadata(c)
 				if err == nil && chatFile.Metadata.Favorite {
-					favorites = append(favorites, c)
+					favorites = append(favorites, "★ "+c)
 				}
 			}
 			if len(favorites) == 0 {
 				continue
 			}
-			idx, err := selectFromList("Select Favorite Chat to Open", favorites)
+			idx, err := selectFromList("Select Favorite Chat to Load", favorites)
 			if err != nil || idx < 0 || idx >= len(favorites) {
 				continue
 			}
-			chatFile, err := loadChatWithMetadata(favorites[idx])
+			chatName := strings.TrimPrefix(favorites[idx], "★ ")
+			chatFile, err := loadChatWithMetadata(chatName)
 			if err != nil {
 				return err
 			}
 			reader := bufio.NewReader(os.Stdin)
-			gui := NewChatGUI(favorites[idx], chatFile.Messages, chatFile.Metadata.Model, reader)
+			gui := NewChatGUI(chatName, chatFile.Messages, chatFile.Metadata.Model, reader)
 			if err := gui.Run(); err != nil {
+				if err == ErrMenuBack {
+					continue
+				}
 				return err
 			}
 		case 1: // Add Favorite
@@ -1257,7 +1475,7 @@ func GUIMenuFavorites() error {
 			for _, c := range chats {
 				chatFile, err := loadChatWithMetadata(c)
 				if err == nil && chatFile.Metadata.Favorite {
-					favorites = append(favorites, c)
+					favorites = append(favorites, "★ "+c)
 				}
 			}
 			if len(favorites) == 0 {
@@ -1267,11 +1485,12 @@ func GUIMenuFavorites() error {
 			if err != nil || idx < 0 || idx >= len(favorites) {
 				continue
 			}
-			if err := toggleChatFavorite(favorites[idx]); err != nil {
+			chatName := strings.TrimPrefix(favorites[idx], "★ ")
+			if err := toggleChatFavorite(chatName); err != nil {
 				return err
 			}
 		case 3: // Back
-			return nil
+			return ErrMenuBack
 		}
 	}
 }
@@ -1293,6 +1512,12 @@ func GUIMenuPrompts() error {
 			return err
 		}
 		menuModel := finalModel.(MenuModel)
+		if menuModel.selected == -1 {
+			return ErrMenuBack
+		}
+		if menuModel.selected == -2 || menuModel.selected == 4 {
+			return ErrMenuBack
+		}
 		switch menuModel.selected {
 		case 0: // List Prompts
 			prompts, err := loadPrompts()
@@ -1360,8 +1585,9 @@ func GUIMenuPrompts() error {
 			if err := savePrompts(prompts); err != nil {
 				return err
 			}
+			fmt.Println("Default prompt set to:", prompts[idx].Name)
 		case 4: // Back
-			return nil
+			return ErrMenuBack
 		}
 	}
 }
@@ -1383,6 +1609,12 @@ func GUIMenuModels() error {
 			return err
 		}
 		menuModel := finalModel.(MenuModel)
+		if menuModel.selected == -1 {
+			return ErrMenuBack
+		}
+		if menuModel.selected == -2 || menuModel.selected == 4 {
+			return ErrMenuBack
+		}
 		switch menuModel.selected {
 		case 0: // List Models
 			models, defaultModel, err := loadModelsWithMostRecent()
@@ -1399,12 +1631,69 @@ func GUIMenuModels() error {
 			}
 			_, _ = selectFromList("Models", names)
 		case 1: // Add Model
-			reader := bufio.NewReader(os.Stdin)
-			fmt.Print("Model name: ")
-			name, _ := reader.ReadString('\n')
-			name = strings.TrimSpace(name)
-			// TODO: Actually add model to config and save
-			fmt.Println("Model added (not yet implemented)")
+			// Prompt for model name (text input)
+			inputModel := TextInputModel{prompt: "Enter model name (leave blank to paste from clipboard):", value: "", cursor: 0, width: 40}
+			p := tea.NewProgram(inputModel, tea.WithAltScreen())
+			finalInput, err := p.Run()
+			if err != nil {
+				return err
+			}
+			input := finalInput.(TextInputModel)
+			if input.quitting {
+				continue
+			}
+			modelName := strings.TrimSpace(input.value)
+			if modelName == "" {
+				clipText, err := clipboard.ReadAll()
+				if err != nil {
+					fmt.Println("Failed to read from clipboard:", err)
+					continue
+				}
+				modelName = strings.TrimSpace(clipText)
+			}
+			if modelName == "" {
+				fmt.Println("Model name cannot be empty.")
+				continue
+			}
+			// Load models config
+			path := filepath.Join(utilPath, "models.json")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			var config struct {
+				Models []struct {
+					Name      string `json:"name"`
+					IsDefault bool   `json:"is_default"`
+				} `json:"models"`
+			}
+			if err := json.Unmarshal(data, &config); err != nil {
+				return err
+			}
+			// Check for duplicate
+			duplicate := false
+			for _, m := range config.Models {
+				if m.Name == modelName {
+					duplicate = true
+					break
+				}
+			}
+			if duplicate {
+				fmt.Println("Model already exists.")
+				continue
+			}
+			config.Models = append(config.Models, struct {
+				Name      string `json:"name"`
+				IsDefault bool   `json:"is_default"`
+			}{Name: modelName, IsDefault: false})
+			newData, err := json.MarshalIndent(config, "", "  ")
+			if err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, newData, 0644); err != nil {
+				return err
+			}
+			fmt.Println("Model added:", modelName)
 		case 2: // Remove Model
 			models, _, err := loadModelsWithMostRecent()
 			if err != nil {
@@ -1425,10 +1714,13 @@ func GUIMenuModels() error {
 			if err != nil || idx < 0 || idx >= len(models) {
 				continue
 			}
-			// TODO: Actually set default model in config and save
-			fmt.Println("Default model set (not yet implemented)")
+			// Save default model to config (implement saveDefaultModel)
+			if err := saveDefaultModel(models[idx]); err != nil {
+				return err
+			}
+			fmt.Println("Default model set to:", models[idx])
 		case 4: // Back
-			return nil
+			return ErrMenuBack
 		}
 	}
 }
@@ -1512,7 +1804,7 @@ func GUIMenuAPIKey() error {
 				return err
 			}
 		case 4: // Back
-			return nil
+			return ErrMenuBack
 		}
 	}
 }
@@ -1546,7 +1838,7 @@ func GUIShowHelp() error {
 			fmt.Println("Press Enter to continue...")
 			bufio.NewReader(os.Stdin).ReadBytes('\n')
 		case 2: // Back
-			return nil
+			return ErrMenuBack
 		}
 	}
 }
@@ -1572,6 +1864,234 @@ func parseMarkdown(content string) string {
 }
 
 // YesNoModel minimal tea.Model implementation
-func (m YesNoModel) Init() tea.Cmd                           { return nil }
-func (m YesNoModel) View() string                            { return "" }
-func (m YesNoModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) { return m, nil }
+func (m YesNoModel) Init() tea.Cmd { return nil }
+
+// Update YesNoModel to support red border and default No
+// Update YesNoModel.View to render the prompt with red border and highlight selected option
+func (m YesNoModel) View() string {
+	boxWidth := 40
+	prompt := "Are you sure you want to quit?"
+	options := []string{"Yes", "No"}
+	var renderedOptions []string
+	for i, opt := range options {
+		style := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Bold(false).Width(8).Align(lipgloss.Center)
+		if i == m.selected {
+			style = style.Bold(true).Foreground(lipgloss.Color("203")).Background(lipgloss.Color("236"))
+		}
+		renderedOptions = append(renderedOptions, style.Render(opt))
+	}
+	optionsLine := lipgloss.JoinHorizontal(lipgloss.Center, renderedOptions...)
+	content := lipgloss.NewStyle().Width(boxWidth).Align(lipgloss.Center).Render(prompt + "\n\n" + optionsLine)
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("203")).
+		Padding(1, 2).
+		Width(boxWidth + 4).
+		Align(lipgloss.Center).
+		Render(content)
+	return box
+}
+
+// Update YesNoModel tea.Model logic to support left/right/enter
+func (m YesNoModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "left", "h":
+			if m.selected > 0 {
+				m.selected--
+			}
+		case "right", "l":
+			if m.selected < 1 {
+				m.selected++
+			}
+		case "tab":
+			m.selected = 1 - m.selected
+		case "enter":
+			m.result = (m.selected == 0)
+			return m, tea.Quit
+		case "esc":
+			m.result = false
+			return m, tea.Quit
+		}
+	}
+	return m, nil
+}
+
+// --- Custom Chat GUI Flow ---
+
+// TextInputModel for chat name input
+type TextInputModel struct {
+	prompt   string
+	value    string
+	cursor   int
+	quitting bool
+	width    int
+	message  string
+}
+
+func (m TextInputModel) Init() tea.Cmd { return nil }
+
+func (m TextInputModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "esc":
+			m.quitting = true
+			return m, tea.Quit
+		case "enter":
+			return m, tea.Quit
+		case "backspace":
+			if m.cursor > 0 && len(m.value) > 0 {
+				m.value = m.value[:m.cursor-1] + m.value[m.cursor:]
+				m.cursor--
+			}
+		case "left":
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case "right":
+			if m.cursor < len(m.value) {
+				m.cursor++
+			}
+		default:
+			if len(msg.String()) == 1 && msg.Type == tea.KeyRunes {
+				m.value = m.value[:m.cursor] + msg.String() + m.value[m.cursor:]
+				m.cursor++
+			}
+		}
+	}
+	return m, nil
+}
+
+func (m TextInputModel) View() string {
+	prompt := lipgloss.NewStyle().Bold(true).Render(m.prompt)
+	input := m.value
+	if m.cursor >= 0 && m.cursor <= len(input) {
+		input = input[:m.cursor] + "|" + input[m.cursor:]
+	}
+	inputBox := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("63")).Padding(0, 1).Width(40).Render(input)
+	msg := ""
+	if m.message != "" {
+		msg = "\n" + lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render(m.message)
+	}
+	return lipgloss.PlaceHorizontal(60, lipgloss.Center, prompt+"\n"+inputBox+msg)
+}
+
+func GUICustomChatFlow() error {
+	// 1. Chat name input
+	nameModel := TextInputModel{prompt: "Enter chat name (leave blank for timestamp):", value: "", cursor: 0, width: 40}
+	p := tea.NewProgram(nameModel, tea.WithAltScreen())
+	finalModel, err := p.Run()
+	if err != nil {
+		return err
+	}
+	nameInput := finalModel.(TextInputModel)
+	if nameInput.quitting {
+		return ErrMenuBack
+	}
+	chatName := strings.TrimSpace(nameInput.value)
+	if chatName == "" {
+		chatName = generateTimestampChatName()
+	}
+	// Check for duplicate
+	chats, err := listChats()
+	if err != nil {
+		return err
+	}
+	for _, c := range chats {
+		if c == chatName {
+			return fmt.Errorf("chat '%s' already exists", chatName)
+		}
+	}
+
+	// 2. Model selection
+	models, _, err := loadModelsWithMostRecent()
+	if err != nil || len(models) == 0 {
+		return fmt.Errorf("no models available")
+	}
+	modelIdx, err := selectFromList("Select Model", models)
+	if err != nil || modelIdx < 0 || modelIdx >= len(models) {
+		return ErrMenuBack
+	}
+	model := models[modelIdx]
+
+	// 3. Prompt selection
+	prompts, err := loadPrompts()
+	if err != nil || len(prompts) == 0 {
+		// Try to initialize default prompts if missing
+		prompts, err = initializeDefaultPrompts()
+		if err != nil || len(prompts) == 0 {
+			return fmt.Errorf("no prompts available")
+		}
+	}
+	promptNames := make([]string, len(prompts))
+	for i, p := range prompts {
+		promptNames[i] = p.Name
+	}
+	promptIdx, err := selectFromList("Select Prompt", promptNames)
+	if err != nil || promptIdx < 0 || promptIdx >= len(prompts) {
+		return ErrMenuBack
+	}
+	promptContent := prompts[promptIdx].Content
+
+	// 4. Create chat and launch
+	messages := []Message{{Role: "system", Content: promptContent}}
+	chatFile := ChatFile{
+		Messages: messages,
+		Metadata: ChatMetadata{
+			Model:     model,
+			CreatedAt: time.Now(),
+		},
+	}
+	data, err := json.MarshalIndent(chatFile, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal chat: %w", err)
+	}
+	err = os.WriteFile(filepath.Join(chatsPath, chatName+".json"), data, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write chat file '%s': %w", chatName, err)
+	}
+	gui := NewChatGUI(chatName, messages, model, bufio.NewReader(os.Stdin))
+	return gui.Run()
+}
+
+// Implement saveDefaultModel
+func saveDefaultModel(modelName string) error {
+	// Load models config
+	path := filepath.Join(utilPath, "models.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	var config struct {
+		Models []struct {
+			Name      string `json:"name"`
+			IsDefault bool   `json:"is_default"`
+		} `json:"models"`
+	}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return err
+	}
+	found := false
+	for i := range config.Models {
+		if config.Models[i].Name == modelName {
+			config.Models[i].IsDefault = true
+			found = true
+		} else {
+			config.Models[i].IsDefault = false
+		}
+	}
+	if !found {
+		// Add model if not present
+		config.Models = append(config.Models, struct {
+			Name      string `json:"name"`
+			IsDefault bool   `json:"is_default"`
+		}{Name: modelName, IsDefault: true})
+	}
+	newData, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, newData, 0644)
+}

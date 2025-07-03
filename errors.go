@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -98,3 +99,5 @@ func handleError(err error, context string) {
 
 // errorLog is the global error logger instance
 var errorLog = NewErrorLog()
+
+var ErrMenuBack = errors.New("menu back")
