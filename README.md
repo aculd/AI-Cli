@@ -35,10 +35,10 @@ Or grab a binary from [Releases](https://github.com/aculd/go-ai-cli/releases).
 
 | Menu/General         | Chat Window           | Vim-style      |
 |---------------------|----------------------|---------------|
-| ↑↓      Navigate    | Enter   Send message | :g  Title     |
-| Enter   Select      | Ctrl+S Stop request  | :f  Favorite  |
-| Esc     Back        | Ctrl+C Quit          | :q  Quit      |
-| Ctrl+C  Quit        | ↑↓      Scroll msgs  |               |
+| ↑↓      Navigate    | Enter   Send message | :g  AI Title  |
+| Enter   Select      | Ctrl+S Stop request  | :t "Title"    |
+| Esc     Back        | Ctrl+C Quit          | :f  Favorite  |
+| Ctrl+C  Quit        | ↑↓      Scroll msgs  | :q  Quit      |
 |                     | PgUp/Dn Scroll page  |               |
 |                     | Home/End Top/Bottom  |               |
 |                     |                      |               |
@@ -64,7 +64,8 @@ On first run, creates:
 - **Custom Chat:** Pick API key, model, prompt
 - **Scroll:** Use ↑↓ PgUp/Dn Home/End
 - **Stop:** Ctrl+S during response
-- **Vim:** `:g` generate title, `:f` favorite, `:q` quit
+- **Vim:** `:g` AI title, `:t "title"` set title, `:f` favorite, `:q` quit
+- **Chat Names:** Auto-timestamped (YYYY-MM-DD_HH-MM-SS) or custom titles
 
 ---
 

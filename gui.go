@@ -359,6 +359,7 @@ type ChatModel struct {
 	scrollPos   int       // Current scroll position (index of first visible message)
 	autoScroll  bool      // Whether to auto-scroll to bottom
 	stopChan    chan bool // Channel to signal stop request
+	showConfirm bool      // Whether to show exit confirmation
 }
 
 func (m ChatModel) Init() tea.Cmd {
@@ -389,6 +390,31 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "q":
 			m.quitting = true
 			return m, tea.Quit
+		case "esc":
+			if m.showConfirm {
+				// User confirmed exit
+				if err := saveChat(m.chatName, m.messages); err == nil {
+					m.status = fmt.Sprintf("Saving %s...", m.chatName)
+				}
+				m.quitting = true
+				return m, tea.Quit
+			} else {
+				// Show exit confirmation
+				m.showConfirm = true
+				return m, nil
+			}
+		default:
+			if m.showConfirm {
+				// User cancelled exit confirmation
+				m.showConfirm = false
+				return m, nil
+			}
+			if !m.loading && len(msg.String()) == 1 {
+				char := msg.String()[0]
+				if char >= 32 && char <= 126 {
+					m.inputBuffer += msg.String()
+				}
+			}
 		case "enter":
 			if m.inputBuffer != "" && !m.loading {
 				if strings.HasPrefix(m.inputBuffer, ":") {
@@ -470,13 +496,6 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				maxScroll := max(0, len(m.getVisibleMessages())-(m.height-6))
 				m.scrollPos = min(maxScroll, m.scrollPos+1)
 				m.autoScroll = false
-			}
-		default:
-			if !m.loading && len(msg.String()) == 1 {
-				char := msg.String()[0]
-				if char >= 32 && char <= 126 {
-					m.inputBuffer += msg.String()
-				}
 			}
 		}
 	case tea.WindowSizeMsg:
@@ -583,7 +602,7 @@ func (m ChatModel) View() string {
 	}
 
 	// Add vim commands hint
-	controlHints = append(controlHints, ":g to generate title, :f to favorite, :q to quit")
+	controlHints = append(controlHints, ":g to generate title, :t \"title\" to set title, :f to favorite, :q to quit")
 
 	if len(controlHints) > 0 {
 		statusText += " | " + strings.Join(controlHints, ", ")
@@ -681,12 +700,32 @@ func (m ChatModel) View() string {
 	// Create chat box with border
 	chatBox := chatBoxStyle.Width(m.width - 2).Height(chatBoxHeight).Render(chatContent)
 
+	// Show confirmation dialog if needed
+	if m.showConfirm {
+		confirmStyle := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("203")).
+			Padding(1, 2).
+			Background(lipgloss.Color("236")).
+			Foreground(lipgloss.Color("252"))
+
+		confirmText := fmt.Sprintf("Are you sure you want to end the chat?\n\nPress ESC to confirm, any other key to cancel")
+		confirmBox := confirmStyle.Width(m.width - 10).Render(confirmText)
+
+		// Center the confirmation box
+		centeredConfirm := lipgloss.NewStyle().Margin((m.height-5)/2, (m.width-lipgloss.Width(confirmBox))/2).Render(confirmBox)
+
+		return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(centeredConfirm)
+	}
+
 	// Input area - always 3 lines tall at bottom
 	inputText := "Input: " + m.inputBuffer
 	if m.loading {
 		inputText += " " + getSpinnerChar(m.spinner) + " waiting for response... (ctrl + s to stop and edit message)"
 	} else if m.inputBuffer == "" {
 		inputText += " waiting for input..."
+		// Add vim command hints on a new line
+		inputText += "\nsend :g to generate title, :t \"title\" to set title, :f to favorite, :q to quit"
 	}
 
 	// Pad input text to fill 3 lines
@@ -727,6 +766,7 @@ func (g *ChatGUI) Run() error {
 		height:      24,
 		status:      "Ready",
 		quitting:    false,
+		showConfirm: false,
 	}
 
 	// Run the program
@@ -2142,35 +2182,32 @@ func (m ChatModel) getVisibleMessages() []Message {
 }
 
 func (m *ChatModel) handleVimCommand(cmd string) bool {
-	switch cmd {
-	case ":g":
+	switch {
+	case cmd == ":g":
+		// Generate title using AI
 		if len(m.messages) > 0 {
-			var lastUserMsg string
-			for i := len(m.messages) - 1; i >= 0; i-- {
-				if m.messages[i].Role == "user" {
-					lastUserMsg = m.messages[i].Content
-					break
-				}
-			}
-			if lastUserMsg != "" {
-				words := strings.Fields(lastUserMsg)
-				if len(words) > 0 {
-					titleWords := words
-					if len(words) > 5 {
-						titleWords = words[:5]
-					}
-					newTitle := strings.Join(titleWords, "-")
-					oldPath := filepath.Join(chatsPath, m.chatName+".json")
-					newPath := filepath.Join(chatsPath, newTitle+".json")
-					if err := os.Rename(oldPath, newPath); err == nil {
-						m.chatName = newTitle
-						m.status = "Title generated successfully"
-					}
-				}
+			title := generateChatTitle(m.messages, m.model)
+			if err := setChatTitle(m.chatName, title); err == nil {
+				m.status = fmt.Sprintf("Title generated: %s", title)
+			} else {
+				m.status = "Failed to set title"
 			}
 		}
 		return true
-	case ":f":
+	case strings.HasPrefix(cmd, ":t "):
+		// Set custom title
+		title := strings.TrimSpace(strings.TrimPrefix(cmd, ":t "))
+		// Remove quotes if present
+		title = strings.Trim(title, `"'`)
+		if title != "" {
+			if err := setChatTitle(m.chatName, title); err == nil {
+				m.status = fmt.Sprintf("Title set: %s", title)
+			} else {
+				m.status = "Failed to set title"
+			}
+		}
+		return true
+	case cmd == ":f":
 		chatFile, err := loadChatWithMetadata(m.chatName)
 		if err == nil {
 			chatFile.Metadata.Favorite = !chatFile.Metadata.Favorite
@@ -2183,7 +2220,7 @@ func (m *ChatModel) handleVimCommand(cmd string) bool {
 			}
 		}
 		return true
-	case ":q":
+	case cmd == ":q":
 		if err := saveChat(m.chatName, m.messages); err == nil {
 			m.quitting = true
 			return true
@@ -2204,7 +2241,7 @@ func parseMarkdown(content string) string {
 	lines := strings.Split(content, "\n")
 	var result []string
 
-	for _, line := range lines {
+	for i, line := range lines {
 		styledLine := line
 
 		// Headers (h1-h6)
@@ -2221,7 +2258,7 @@ func parseMarkdown(content string) string {
 		} else if strings.HasPrefix(line, "###### ") {
 			styledLine = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("240")).Render(strings.TrimPrefix(line, "###### "))
 		} else {
-			// Bold text (**text** or __text__)
+			// Bold text (**text** or __bold__)
 			styledLine = parseBoldText(styledLine)
 
 			// Italic text (*text* or _text_)
@@ -2241,6 +2278,11 @@ func parseMarkdown(content string) string {
 		}
 
 		result = append(result, styledLine)
+
+		// Add newline after each line except the last one
+		if i < len(lines)-1 {
+			result = append(result, "")
+		}
 	}
 
 	return strings.Join(result, "\n")

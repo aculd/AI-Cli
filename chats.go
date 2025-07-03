@@ -22,6 +22,7 @@ type Message struct {
 // Add Model string to store the model used for the chat
 type ChatMetadata struct {
 	Summary   string    `json:"summary,omitempty"`
+	Title     string    `json:"title,omitempty"`
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	Model     string    `json:"model,omitempty"`
 	Favorite  bool      `json:"favorite,omitempty"`
@@ -214,7 +215,20 @@ func listChatsAndSummarize() error {
 		if chatFile.Metadata.Favorite {
 			favoriteMark = "★"
 		}
-		fmt.Printf("%d) %s %s\n", i+1, c, favoriteMark)
+
+		// Show title if available, otherwise show timestamp
+		displayName := c
+		if chatFile.Metadata.Title != "" {
+			displayName = chatFile.Metadata.Title
+		}
+
+		fmt.Printf("%d) %s %s\n", i+1, displayName, favoriteMark)
+
+		// Show timestamp and summary
+		if chatFile.Metadata.Title != "" {
+			fmt.Printf("   ID: %s\n", c)
+		}
+
 		summary := chatFile.Metadata.Summary
 		if summary == "" {
 			summary = "No summary available."
@@ -1058,4 +1072,68 @@ func guiChatMenu(reader *bufio.Reader) error {
 	}
 	RunMenu(menu, reader)
 	return nil
+}
+
+// setChatTitle sets the title for a chat
+func setChatTitle(chatName string, title string) error {
+	chatFile, err := loadChatWithMetadata(chatName)
+	if err != nil {
+		return fmt.Errorf("failed to load chat: %w", err)
+	}
+
+	chatFile.Metadata.Title = title
+
+	data, err := json.MarshalIndent(chatFile, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal chat: %w", err)
+	}
+
+	err = os.WriteFile(filepath.Join(chatsPath, chatName+".json"), data, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write chat file: %w", err)
+	}
+
+	return nil
+}
+
+// getChatTitle gets the title for a chat, returns empty string if no title
+func getChatTitle(chatName string) string {
+	chatFile, err := loadChatWithMetadata(chatName)
+	if err != nil {
+		return ""
+	}
+	return chatFile.Metadata.Title
+}
+
+// generateChatTitle generates a title for the chat using AI
+func generateChatTitle(messages []Message, model string) string {
+	if len(messages) == 0 {
+		return "Empty chat"
+	}
+
+	// Create prompt for title generation
+	titlePrompt := Message{
+		Role:    "user",
+		Content: "Please provide an accurate title for this chat so that it can be easily recognized from a list of archived chats. Keep it concise (under 50 characters) and descriptive.",
+	}
+	titleMessages := append(messages, titlePrompt)
+
+	// Temporarily redirect stdout to /dev/null during title generation
+	savedStdout := os.Stdout
+	os.Stdout = nil
+
+	title, err := streamChatResponse(titleMessages, model)
+
+	// Restore stdout
+	os.Stdout = savedStdout
+
+	if err != nil {
+		return fmt.Sprintf("Chat with %d messages", len(messages))
+	}
+
+	// Clean up the title (remove quotes, extra whitespace, etc.)
+	title = strings.TrimSpace(title)
+	title = strings.Trim(title, `"'`)
+
+	return title
 }
