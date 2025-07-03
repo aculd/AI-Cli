@@ -2573,7 +2573,7 @@ func GUIShowHelp() error {
 }
 
 func blinkTick() tea.Cmd {
-	return tea.Tick(500*time.Millisecond, func(t time.Time) tea.Msg {
+	return tea.Tick(530*time.Millisecond, func(t time.Time) tea.Msg {
 		return blinkTickMsg{}
 	})
 }
