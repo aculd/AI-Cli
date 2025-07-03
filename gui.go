@@ -549,6 +549,15 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.scrollPos = min(maxScroll, m.scrollPos+1)
 				m.autoScroll = false
 			}
+		case "ctrl+q":
+			if m.inputBuffer != "" || len(m.messages) > 0 {
+				// If in chat, prompt for confirmation
+				m.showConfirm = true
+				return m, nil
+			} else {
+				m.quitting = true
+				return m, tea.Quit
+			}
 		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
