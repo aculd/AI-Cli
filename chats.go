@@ -288,7 +288,7 @@ func loadAndContinueChat(reader *bufio.Reader) error {
 // generateTimestampChatName generates a timestamp-based chat name in ddmmyyhhss format
 func generateTimestampChatName() string {
 	now := time.Now()
-	return now.Format("020106150405") // ddmmyyhhss
+	return now.Format("2006-01-02_15-04-05") // YYYY-MM-DD_HH-MM-SS
 }
 
 // quickChatFlow creates a new chat using default model and prompt
