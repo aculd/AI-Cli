@@ -56,12 +56,12 @@ func loadPrompts() ([]Prompt, error) {
 		if os.IsNotExist(err) {
 			return initializeDefaultPrompts()
 		}
-		return nil, err
+		return nil, fmt.Errorf("failed to read prompts.json: %w", err)
 	}
 
 	var prompts []Prompt
 	if err := json.Unmarshal(data, &prompts); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to parse prompts.json: %w", err)
 	}
 
 	return prompts, nil

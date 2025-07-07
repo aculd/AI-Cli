@@ -12,11 +12,6 @@ import (
 	"strings"
 )
 
-var (
-	apiURL = "https://openrouter.ai/api/v1/chat/completions"
-	apiKey string
-)
-
 // StreamRequestBody represents the request body for chat completions
 type StreamRequestBody struct {
 	Model       string    `json:"model"`
@@ -57,15 +52,6 @@ type Model struct {
 // ModelsConfig represents the models configuration stored in JSON
 type ModelsConfig struct {
 	Models []Model `json:"models"`
-}
-
-func init() {
-	key, err := readAPIKey()
-	if err != nil {
-		fmt.Println("Error reading API key:", err)
-		os.Exit(1)
-	}
-	apiKey = key
 }
 
 func modelsFilePath() string {
@@ -141,6 +127,11 @@ func loadModelsWithMostRecent() ([]string, string, error) {
 
 // streamChatResponse handles the chat API response streaming
 func streamChatResponse(messages []Message, model string) (string, error) {
+	key, url, err := getActiveAPIKeyAndURL()
+	if err != nil {
+		handleError(err, "getting active API key and url")
+		return "", err
+	}
 	reqBody := StreamRequestBody{
 		Model:       model,
 		Messages:    messages,
@@ -154,12 +145,12 @@ func streamChatResponse(messages []Message, model string) (string, error) {
 		return "", err
 	}
 
-	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(bodyBytes))
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		handleError(err, "creating API request")
 		return "", err
 	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("HTTP-Referer", "https://github.com/go-ai-cli")
 	req.Header.Set("X-Title", "Go AI CLI")

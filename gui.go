@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -171,6 +172,10 @@ func spinnerTick() tea.Cmd {
 
 // streamChatResponseGUI is a version of streamChatResponse that doesn't print to stdout
 func streamChatResponseGUI(messages []Message, model string, stopChan chan bool) (string, error) {
+	key, url, err := getActiveAPIKeyAndURL()
+	if err != nil {
+		return "", err
+	}
 	reqBody := StreamRequestBody{
 		Model:       model,
 		Messages:    messages,
@@ -183,16 +188,11 @@ func streamChatResponseGUI(messages []Message, model string, stopChan chan bool)
 		return "", err
 	}
 
-	apiKey, err := getActiveAPIKey()
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		return "", err
 	}
-
-	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
+	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("HTTP-Referer", "https://github.com/go-ai-cli")
 	req.Header.Set("X-Title", "Go AI CLI")
@@ -379,12 +379,17 @@ type ChatModel struct {
 	confirmResult      *bool     // Pointer to store the result of confirmation
 	pendingUserMessage string
 	confirmModel       YesNoModel
-	selectedMessageIdx int  // Index of selected message in visible window, -1 if none
-	showGoodbye        bool // Show goodbye modal after chat is saved
-	showMessageModal   bool // Show modal for viewing a message
-	modalMessageIdx    int  // Index of message being viewed in modal (absolute index in visibleMessages)
-	showExitGoodbye    bool // Show goodbye modal for ctrl+q exit
-	exitAfterGoodbye   bool // Track if goodbye modal is for ctrl+q exit
+	selectedMessageIdx int    // Index of selected message in visible window, -1 if none
+	showGoodbye        bool   // Show goodbye modal after chat is saved
+	showMessageModal   bool   // Show modal for viewing a message
+	modalMessageIdx    int    // Index of message being viewed in modal (absolute index in visibleMessages)
+	showExitGoodbye    bool   // Show goodbye modal for ctrl+q exit
+	exitAfterGoodbye   bool   // Track if goodbye modal is for ctrl+q exit
+	showErrorModal     bool   // Whether to show the error modal
+	errorModalMsg      string // The error message to display in the modal
+	currentPage        int    // Current page index (0-based)
+	totalPages         int    // Total number of pages (computed dynamically)
+	pageStartIndices   []int  // Start index of each page (for accurate paging)
 }
 
 func (m ChatModel) Init() tea.Cmd {
@@ -449,16 +454,9 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c":
 			if m.selectedMessageIdx >= 0 && m.inputBuffer == "" && !m.loading {
-				visibleMessages := m.getVisibleMessages()
-				chatBoxHeight := m.height - 1 - 1 - 3 - 2
-				if chatBoxHeight < 1 {
-					chatBoxHeight = 1
-				}
-				startIdx := m.scrollPos
-				endIdx := min(startIdx+chatBoxHeight, len(visibleMessages))
-				idx := m.selectedMessageIdx
-				if idx >= 0 && idx < endIdx-startIdx {
-					msg := visibleMessages[startIdx+idx]
+				pageMessages := m.getPageMessages()
+				if m.selectedMessageIdx >= 0 && m.selectedMessageIdx < len(pageMessages) {
+					msg := pageMessages[m.selectedMessageIdx]
 					safe := strings.ReplaceAll(msg.Content, "\x00", "")
 					clipboard.WriteAll(safe)
 					m.status = "Copied message to clipboard"
@@ -504,6 +502,10 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.showConfirm = true
 				return m, nil
+			} else if !m.showConfirm && !m.generatingTitle && !m.showHelp && !m.showError && !m.showErrorModal && !m.showGoodbye && !m.showExitGoodbye && !m.showMessageModal {
+				// Not in any modal or special state: exit immediately
+				m.quitting = true
+				return m, tea.Quit
 			} else {
 				m.showConfirm = true
 				return m, nil
@@ -553,93 +555,62 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.pendingUserMessage = m.inputBuffer
 				m.inputBuffer = ""
+				// Immediately append user message for display
+				m.messages = append(m.messages, Message{Role: "user", Content: m.pendingUserMessage})
 				m.loading = true
 				m.status = "Waiting for AI response..."
 				m.autoScroll = true
 				m.stopChan = make(chan bool)
-				// Do not append to m.messages yet; only after response
-				return m, tea.Batch(getAIResponseCmd(append(m.messages, Message{Role: "user", Content: m.pendingUserMessage}), m.model, m.stopChan), spinnerTick())
+				return m, tea.Batch(getAIResponseCmd(m.messages, m.model, m.stopChan), spinnerTick())
 			}
-		case "pageup":
-			if !m.loading {
-				chatBoxHeight := m.height - 1 - 1 - 3 - 2
-				if chatBoxHeight < 1 {
-					chatBoxHeight = 1
-				}
-				m.scrollPos = max(0, m.scrollPos-chatBoxHeight)
+		case "pageup", "shift+up", "pgup", "ctrl+up":
+			if !m.loading && m.currentPage > 0 {
+				m.currentPage--
+				m.updatePagination()
+				m.selectedMessageIdx = 0
 				m.autoScroll = false
 			}
-		case "pagedown":
-			if !m.loading {
-				chatBoxHeight := m.height - 1 - 1 - 3 - 2
-				if chatBoxHeight < 1 {
-					chatBoxHeight = 1
-				}
-				maxScroll := max(0, len(m.getVisibleMessages())-chatBoxHeight)
-				m.scrollPos = min(maxScroll, m.scrollPos+chatBoxHeight)
+		case "pagedown", "shift+down", "pgdn", "ctrl+down":
+			if !m.loading && m.currentPage < m.totalPages-1 {
+				m.currentPage++
+				m.updatePagination()
+				m.selectedMessageIdx = 0
 				m.autoScroll = false
 			}
 		case "up":
 			if !m.loading && m.inputBuffer == "" {
-				visibleMessages := m.getVisibleMessages()
-				chatBoxHeight := m.height - 1 - 1 - 3 - 2
-				if chatBoxHeight < 1 {
-					chatBoxHeight = 1
-				}
-				startIdx := m.scrollPos
-				endIdx := min(startIdx+chatBoxHeight, len(visibleMessages))
-				if m.selectedMessageIdx == -1 && endIdx-startIdx > 0 {
-					// Highlight the top message
+				pageMessages := m.getPageMessages()
+				if m.selectedMessageIdx == -1 && len(pageMessages) > 0 {
+					// Highlight the top message on current page
 					m.selectedMessageIdx = 0
 				} else if m.selectedMessageIdx > 0 {
+					// Move up within current page
 					m.selectedMessageIdx--
-				} else if m.selectedMessageIdx == 0 && m.scrollPos > 0 {
-					m.scrollPos--
-					// keep selection at top
+				} else if m.selectedMessageIdx == 0 && m.currentPage > 0 {
+					// Move to previous page and select last message
+					m.currentPage--
+					m.updatePagination()
+					newPageMessages := m.getPageMessages()
+					if len(newPageMessages) > 0 {
+						m.selectedMessageIdx = len(newPageMessages) - 1
+					}
 				}
-				m.autoScroll = false
 			}
 		case "down":
 			if !m.loading && m.inputBuffer == "" {
-				visibleMessages := m.getVisibleMessages()
-				chatBoxHeight := m.height - 1 - 1 - 3 - 2
-				if chatBoxHeight < 1 {
-					chatBoxHeight = 1
-				}
-				startIdx := m.scrollPos
-				endIdx := min(startIdx+chatBoxHeight, len(visibleMessages))
-				if m.selectedMessageIdx == -1 && endIdx-startIdx > 0 {
-					// Highlight the bottom message
-					m.selectedMessageIdx = endIdx - startIdx - 1
-				} else if m.selectedMessageIdx < endIdx-startIdx-1 {
+				pageMessages := m.getPageMessages()
+				if m.selectedMessageIdx == -1 && len(pageMessages) > 0 {
+					// Highlight the bottom message on current page
+					m.selectedMessageIdx = len(pageMessages) - 1
+				} else if m.selectedMessageIdx < len(pageMessages)-1 {
+					// Move down within current page
 					m.selectedMessageIdx++
-				} else if m.selectedMessageIdx == endIdx-startIdx-1 && m.scrollPos < len(visibleMessages)-chatBoxHeight {
-					m.scrollPos++
-					// keep selection at bottom
+				} else if m.selectedMessageIdx == len(pageMessages)-1 && m.currentPage < m.totalPages-1 {
+					// Move to next page and select first message
+					m.currentPage++
+					m.updatePagination()
+					m.selectedMessageIdx = 0
 				}
-				m.autoScroll = false
-			}
-		case "shift+up", "pgup":
-			if !m.loading {
-				m.scrollPos = max(0, m.scrollPos-1)
-				m.autoScroll = false
-			}
-		case "shift+down", "pgdn":
-			if !m.loading {
-				maxScroll := max(0, len(m.getVisibleMessages())-1)
-				m.scrollPos = min(maxScroll, m.scrollPos+1)
-				m.autoScroll = false
-			}
-		case "ctrl+up":
-			if !m.loading {
-				m.scrollPos = max(0, m.scrollPos-1)
-				m.autoScroll = false
-			}
-		case "ctrl+down":
-			if !m.loading {
-				maxScroll := max(0, len(m.getVisibleMessages())-(m.height-6))
-				m.scrollPos = min(maxScroll, m.scrollPos+1)
-				m.autoScroll = false
 			}
 		case "ctrl+q":
 			m.showConfirm = true
@@ -661,12 +632,26 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+o":
 			if m.selectedMessageIdx >= 0 {
 				m.showMessageModal = true
-				m.modalMessageIdx = m.selectedMessageIdx + m.scrollPos
+				// Calculate absolute index: page start + selected message index
+				if len(m.pageStartIndices) > 0 && m.currentPage < len(m.pageStartIndices) {
+					m.modalMessageIdx = m.pageStartIndices[m.currentPage] + m.selectedMessageIdx
+				}
 			}
 		}
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		// Recalculate pagination when window is resized
+		m.updatePagination()
+		// Ensure selected message is still valid after resize
+		pageMessages := m.getPageMessages()
+		if m.selectedMessageIdx >= len(pageMessages) {
+			if len(pageMessages) > 0 {
+				m.selectedMessageIdx = len(pageMessages) - 1
+			} else {
+				m.selectedMessageIdx = -1
+			}
+		}
 	case spinnerTickMsg:
 		if m.loading {
 			m.spinner = (m.spinner + 1) % 4
@@ -685,19 +670,31 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.status = fmt.Sprintf("Error: %v", msg.err)
 			m.pendingUserMessage = ""
+			m.showErrorModal = true
+			m.errorModalMsg = msg.err.Error()
+			return m, nil
 		} else {
 			if msg.response == "" {
 				m.status = "Warning: Empty response received"
 				m.pendingUserMessage = ""
 			} else {
 				if m.pendingUserMessage != "" {
-					m.messages = append(m.messages, Message{Role: "user", Content: m.pendingUserMessage})
+					// Do NOT append the user message again; just clear it
 					m.pendingUserMessage = ""
 				}
 				m.messages = append(m.messages, Message{Role: "assistant", Content: msg.response})
 				m.status = "Ready"
 				if m.autoScroll {
-					m.scrollPos = max(0, len(m.getVisibleMessages())-(m.height-6))
+					// Go to the last page and select the last message
+					m.currentPage = m.totalPages - 1
+					if m.currentPage < 0 {
+						m.currentPage = 0
+					}
+					m.updatePagination()
+					pageMessages := m.getPageMessages()
+					if len(pageMessages) > 0 {
+						m.selectedMessageIdx = len(pageMessages) - 1
+					}
 				}
 				if err := saveChat(m.chatName, m.messages); err != nil {
 					m.status = fmt.Sprintf("Save error: %v", err)
@@ -714,21 +711,47 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case tea.MouseMsg:
 		if !m.loading && m.inputBuffer == "" {
-			chatBoxHeight := m.height - 1 - 1 - 3 - 2 // header, status, input, spacing
-			if chatBoxHeight < 1 {
-				chatBoxHeight = 1
-			}
 			scrolled := false
 			switch msg.Type {
 			case tea.MouseWheelUp:
-				m.scrollPos = max(0, m.scrollPos-chatBoxHeight)
-				m.autoScroll = false
-				scrolled = true
+				// Mimic up arrow key behavior
+				pageMessages := m.getPageMessages()
+				if m.selectedMessageIdx == -1 && len(pageMessages) > 0 {
+					// Highlight the top message on current page
+					m.selectedMessageIdx = 0
+					scrolled = true
+				} else if m.selectedMessageIdx > 0 {
+					// Move up within current page
+					m.selectedMessageIdx--
+					scrolled = true
+				} else if m.selectedMessageIdx == 0 && m.currentPage > 0 {
+					// Move to previous page and select last message
+					m.currentPage--
+					m.updatePagination()
+					newPageMessages := m.getPageMessages()
+					if len(newPageMessages) > 0 {
+						m.selectedMessageIdx = len(newPageMessages) - 1
+					}
+					scrolled = true
+				}
 			case tea.MouseWheelDown:
-				maxScroll := max(0, len(m.getVisibleMessages())-chatBoxHeight)
-				m.scrollPos = min(maxScroll, m.scrollPos+chatBoxHeight)
-				m.autoScroll = false
-				scrolled = true
+				// Mimic down arrow key behavior
+				pageMessages := m.getPageMessages()
+				if m.selectedMessageIdx == -1 && len(pageMessages) > 0 {
+					// Highlight the bottom message on current page
+					m.selectedMessageIdx = len(pageMessages) - 1
+					scrolled = true
+				} else if m.selectedMessageIdx < len(pageMessages)-1 {
+					// Move down within current page
+					m.selectedMessageIdx++
+					scrolled = true
+				} else if m.selectedMessageIdx == len(pageMessages)-1 && m.currentPage < m.totalPages-1 {
+					// Move to next page and select first message
+					m.currentPage++
+					m.updatePagination()
+					m.selectedMessageIdx = 0
+					scrolled = true
+				}
 			}
 			if scrolled {
 				// Trigger a re-render
@@ -760,6 +783,18 @@ func (m ChatModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Ignore all other keys, including esc
 			return m, nil
 		}
+		return m, nil
+	}
+	if m.showErrorModal {
+		if keyMsg, ok := msg.(tea.KeyMsg); ok {
+			switch keyMsg.String() {
+			case "esc", "enter", "ctrl+c":
+				m.showErrorModal = false
+				m.errorModalMsg = ""
+				return m, nil
+			}
+		}
+		// Block all other input while modal is open
 		return m, nil
 	}
 	return m, nil
@@ -801,10 +836,13 @@ func (m ChatModel) View() string {
 		chatBoxHeight = 1
 	}
 
+	m.updatePagination()
+	pageMessages := m.getPageMessages()
+
 	// Header
 	scrollIndicator := ""
-	if len(m.getVisibleMessages()) > chatBoxHeight {
-		scrollIndicator = fmt.Sprintf(" [Scroll: %d/%d]", m.scrollPos+1, len(m.getVisibleMessages()))
+	if m.totalPages > 1 {
+		scrollIndicator = fmt.Sprintf(" [Page: %d/%d]", m.currentPage+1, m.totalPages)
 	}
 	header := titleStyle.Render(fmt.Sprintf("Chat: %s | Model: %s | Messages: %d%s", m.chatName, m.model, len(m.messages), scrollIndicator))
 
@@ -816,105 +854,93 @@ func (m ChatModel) View() string {
 
 	// Add comprehensive control hints
 	controlHints := []string{}
-
-	// Always show basic controls
 	controlHints = append(controlHints, "Ctrl+S to stop", "Ctrl+C to quit")
-
-	// Add scroll controls if there are many messages
-	if len(m.getVisibleMessages()) > chatBoxHeight {
-		controlHints = append(controlHints, "PageUp/Down, Home/End, Ctrl+↑↓, ↑↓ to scroll")
+	if m.totalPages > 1 {
+		controlHints = append(controlHints, "Up/Down to page, ←/→ to select message")
 	}
-
-	// Add vim commands hint
 	controlHints = append(controlHints, ":g to generate title, :t \"title\" to set title, :f to favorite, :q to quit, :h for help")
-
 	if len(controlHints) > 0 {
 		statusText += " | " + strings.Join(controlHints, ", ")
 	}
 	status := statusStyle.Render(statusText)
 
-	// Prepare chat history content with enhanced scrolling
+	// Prepare chat history content with pagination and selection
 	var visible []string
-	visibleMessages := m.getVisibleMessages()
-
-	// Apply scroll position with bounds checking
-	startIdx := m.scrollPos
-	if startIdx < 0 {
-		startIdx = 0
-		m.scrollPos = 0
-	}
-
-	maxScroll := max(0, len(visibleMessages)-chatBoxHeight)
-	if startIdx > maxScroll {
-		startIdx = maxScroll
-		m.scrollPos = maxScroll
-	}
-
-	endIdx := min(startIdx+chatBoxHeight, len(visibleMessages))
-
-	if startIdx < len(visibleMessages) {
-		for i := startIdx; i < endIdx; i++ {
-			msg := visibleMessages[i]
-			var messageText string
-			parsedContent := parseMarkdown(msg.Content)
-			wrappedContent := wrapText(parsedContent, m.width-24) // narrower bubbles
-			lines := strings.Split(wrappedContent, "\n")
-			var bubbleStyle lipgloss.Style
-			var label string
-			isSelected := (m.selectedMessageIdx == i-startIdx)
-			bubbleWidth := m.width / 2
-			if msg.Role == "user" {
-				bubbleStyle = lipgloss.NewStyle().
-					Background(lipgloss.Color("238")).
-					Foreground(lipgloss.Color("252")).
-					Padding(1, 3).
-					Margin(0, 0, 1, 0).
-					Border(lipgloss.RoundedBorder()).
-					BorderForeground(lipgloss.Color("240"))
-				labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
-				if isSelected {
-					labelStyle = labelStyle.Background(lipgloss.Color("238")).Underline(true)
-				}
-				label = fmt.Sprintf("#%d %s", msg.MessageNumber, "User")
-				label = lipgloss.PlaceHorizontal(m.width, lipgloss.Center, labelStyle.Render(label))
-				bubble := bubbleStyle.Width(bubbleWidth).Render(strings.Join(lines, "\n"))
-				messageText = label + "\n" + lipgloss.PlaceHorizontal(m.width, lipgloss.Center, bubble)
-			} else {
-				bubbleStyle = lipgloss.NewStyle().
-					Background(lipgloss.Color("236")).
-					Foreground(lipgloss.Color("252")).
-					Padding(1, 3).
-					Margin(0, 10, 1, 0).
-					Border(lipgloss.RoundedBorder()).
-					BorderForeground(lipgloss.Color("240"))
-				labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true)
-				if isSelected {
-					labelStyle = labelStyle.Background(lipgloss.Color("236")).Underline(true)
-				}
-				label = fmt.Sprintf("#%d %s", msg.MessageNumber, "Assistant")
-				label = lipgloss.PlaceHorizontal(m.width, lipgloss.Center, labelStyle.Render(label))
-				bubble := bubbleStyle.Width(bubbleWidth).Render(strings.Join(lines, "\n"))
-				messageText = label + "\n" + lipgloss.PlaceHorizontal(m.width, lipgloss.Center, bubble)
+	for i, msg := range pageMessages {
+		var messageText string
+		parsedContent := parseText(msg.Content)
+		wrappedContent := wrapText(parsedContent, m.width-24)
+		lines := strings.Split(wrappedContent, "\n")
+		var bubbleStyle lipgloss.Style
+		var label string
+		isSelected := (m.selectedMessageIdx == i)
+		bubbleWidth := m.width / 2
+		if msg.Role == "user" {
+			bubbleStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("238")).
+				Foreground(lipgloss.Color("252")).
+				Padding(1, 3).
+				Margin(0, 0, 1, 0).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("240"))
+			labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+			if isSelected {
+				labelStyle = labelStyle.Background(lipgloss.Color("238")).Underline(true)
 			}
-			visible = append(visible, messageText)
+			label = "User"
+			label = lipgloss.PlaceHorizontal(m.width, lipgloss.Center, labelStyle.Render(label))
+			bubble := bubbleStyle.Width(bubbleWidth).Render(strings.Join(lines, "\n"))
+			messageText = label + "\n" + lipgloss.PlaceHorizontal(m.width, lipgloss.Center, bubble)
+		} else {
+			bubbleStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("236")).
+				Foreground(lipgloss.Color("252")).
+				Padding(1, 3).
+				Margin(0, 10, 1, 0).
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(lipgloss.Color("240"))
+			labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("33")).Bold(true)
+			if isSelected {
+				labelStyle = labelStyle.Background(lipgloss.Color("236")).Underline(true)
+			}
+			label = "Assistant"
+			label = lipgloss.PlaceHorizontal(m.width, lipgloss.Center, labelStyle.Render(label))
+			bubble := bubbleStyle.Width(bubbleWidth).Render(strings.Join(lines, "\n"))
+			messageText = label + "\n" + lipgloss.PlaceHorizontal(m.width, lipgloss.Center, bubble)
 		}
+		visible = append(visible, messageText)
 	}
 
-	// Pad the top with empty lines if not enough messages to fill the chatbox
-	if len(visible) < chatBoxHeight {
-		padLines := make([]string, chatBoxHeight-len(visible))
-		for i := range padLines {
-			padLines[i] = ""
-		}
-		visible = append(padLines, visible...)
-	}
-
-	// Join messages with vertical spacing
+	// No need to pad since we calculate exact message counts that fit
 	messageContent := strings.Join(visible, "\n\n")
 	if messageContent == "" {
 		messageContent = "No messages yet..."
 	}
 	chatBox := chatBoxStyle.Width(m.width - 1).Height(chatBoxHeight).Render(messageContent)
+
+	// Add page indicator overlay in bottom right corner if multiple pages
+	if m.totalPages > 1 {
+		pageIndicator := fmt.Sprintf(" %d/%d ", m.currentPage+1, m.totalPages)
+		indicatorStyle := lipgloss.NewStyle().
+			Background(lipgloss.Color("240")).
+			Foreground(lipgloss.Color("252")).
+			Padding(0, 1)
+		indicatorText := indicatorStyle.Render(pageIndicator)
+
+		// Split chatBox into lines to overlay the indicator
+		chatBoxLines := strings.Split(chatBox, "\n")
+		if len(chatBoxLines) > 0 {
+			lastLine := chatBoxLines[len(chatBoxLines)-1]
+			// Calculate position for bottom right corner
+			indicatorPos := m.width - 1 - len(indicatorText)
+			if indicatorPos > 0 {
+				// Create new last line with indicator
+				newLastLine := lastLine[:indicatorPos] + indicatorText
+				chatBoxLines[len(chatBoxLines)-1] = newLastLine
+				chatBox = strings.Join(chatBoxLines, "\n")
+			}
+		}
+	}
 
 	// Input area - always 3 lines tall at bottom
 	inputText := "Input: "
@@ -923,7 +949,7 @@ func (m ChatModel) View() string {
 	} else {
 		inputRunes := []rune(m.inputBuffer)
 		cursor := "|"
-		renderedInput := ""
+		var renderedInput string
 		for i := 0; i <= len(inputRunes); i++ {
 			if i == m.cursorPos && m.blinkOn {
 				renderedInput += cursor
@@ -934,22 +960,16 @@ func (m ChatModel) View() string {
 		}
 		inputText += renderedInput
 	}
-	// Pad input text to fill 3 lines
 	lines := strings.Split(inputText, "\n")
 	for len(lines) < 3 {
 		lines = append(lines, "")
 	}
 	inputText = strings.Join(lines[:3], "\n")
-
-	// If loading, show spinner and 'Waiting for response...' in input box
 	if m.loading {
 		inputText = getSpinnerChar(m.spinner) + " Waiting for response...\n(Esc to cancel sending, Enter :h for help)\n"
 	}
-
-	// Create input box with border
 	inputBox := inputBoxStyle.Width(m.width - 2).Height(3).Render(inputText)
 
-	// Compose final layout
 	layout := fmt.Sprintf("%s\n%s\n\n%s\n\n%s", header, status, chatBox, inputBox)
 
 	if m.generatingTitle {
@@ -967,67 +987,13 @@ func (m ChatModel) View() string {
 	if m.showError {
 		errorStyle := lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("203")).
-			Padding(1, 2).
-			Background(lipgloss.Color("236")).
-			Foreground(lipgloss.Color("252"))
-		errorBox := errorStyle.Width(m.width - 10).Render(m.errorMsg + "\n\nESC to close")
+			BorderForeground(lipgloss.Color("196")).
+			Padding(1, 2)
+		errorBox := errorStyle.Width(m.width - 10).Render(m.errorMsg)
 		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, errorBox)
 	}
 
-	if m.showHelp {
-		helpText := "Vim Commands:\n:g  Generate title\n:t \"title\"  Set title\n:f  Favorite\n:q  Quit\n:h  Help\n\nChat Scroll:\nShift+Up/Down, PgUp/PgDn  Scroll chat\nHome/End  Move cursor\nLeft/Right  Move cursor"
-		helpBox := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("39")).
-			Padding(1, 2).
-			Background(lipgloss.Color("236")).
-			Foreground(lipgloss.Color("252")).
-			Width(m.width - 10).
-			Render(helpText + "\n\nESC to close")
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, helpBox)
-	}
-
-	if m.showGoodbye {
-		boxWidth := 40
-		goodbyeText := "Chat Saved.\n\nPress enter to continue."
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("203")).
-			Padding(1, 2).
-			Width(boxWidth + 4).
-			Align(lipgloss.Center).
-			Render(lipgloss.NewStyle().Width(boxWidth).Align(lipgloss.Center).Render(goodbyeText))
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
-	}
-
-	if m.showMessageModal {
-		modalContent := m.getVisibleMessages()[m.modalMessageIdx].Content
-		modalBox := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("203")).
-			Padding(1, 2).
-			Background(lipgloss.Color("236")).
-			Foreground(lipgloss.Color("252")).
-			Width(m.width - 10).
-			Render(modalContent + "\n\nESC to close")
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, modalBox)
-	}
-
-	if m.showExitGoodbye {
-		boxWidth := 40
-		goodbyeText := "Goodbye.\n\nPress enter to exit."
-		box := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("203")).
-			Padding(1, 2).
-			Width(boxWidth + 4).
-			Align(lipgloss.Center).
-			Render(lipgloss.NewStyle().Width(boxWidth).Align(lipgloss.Center).Render(goodbyeText))
-		return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
-	}
-
-	return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(layout)
+	return layout
 }
 
 // Run starts the GUI interface using Bubble Tea
@@ -1053,13 +1019,16 @@ func (g *ChatGUI) Run() error {
 		status:      "Ready",
 		quitting:    false,
 	}
-	// Set scroll position to bottom
-	visibleMsgs := model.getVisibleMessages()
-	chatBoxHeight := model.height - 1 - 1 - 3 - 2 // header, status, input, spacing
-	if chatBoxHeight < 1 {
-		chatBoxHeight = 1
+	// Initialize pagination to show the last page
+	model.updatePagination()
+	if model.totalPages > 0 {
+		model.currentPage = model.totalPages - 1
+		model.updatePagination()
+		pageMessages := model.getPageMessages()
+		if len(pageMessages) > 0 {
+			model.selectedMessageIdx = len(pageMessages) - 1
+		}
 	}
-	model.scrollPos = max(0, len(visibleMsgs)-chatBoxHeight)
 	model.autoScroll = true
 
 	// Run the program
@@ -1144,6 +1113,17 @@ func (m MenuModel) View() string {
 	}
 
 	asciiArt := figure.NewFigure("AI CHAT", "", true).String()
+	// Trim leading/trailing newlines for alignment
+	asciiArt = strings.Trim(asciiArt, "\n")
+	// Add an extra space to the first and second lines for visual balance
+	lines := strings.Split(asciiArt, "\n")
+	if len(lines) > 0 {
+		lines[0] = " " + lines[0]
+	}
+	if len(lines) > 1 {
+		lines[1] = "  " + lines[1] // two spaces for the second line
+	}
+	asciiArt = strings.Join(lines, "\n")
 	w := m.width
 	h := m.height
 	if w <= 0 {
@@ -1194,14 +1174,29 @@ func (m MenuModel) View() string {
 	optionsBlock = lipgloss.PlaceVertical(maxOptions, lipgloss.Center, optionsBlock)
 
 	menuBox := menuBoxStyle.Render(optionsBlock)
-	title := titleStyle.Width(parentBoxWidth).Render(m.title)
+	var title string
+	if m.title == "Main Menu" {
+		title = " " // blank line for spacing
+	} else if m.title != "" {
+		title = titleStyle.Width(parentBoxWidth).Render(m.title)
+	}
 
 	controlsText := "Controls: ↑↓ to navigate, Enter to select, Esc to go back, Ctrl+C to quit"
 	controls := lipgloss.NewStyle().Align(lipgloss.Center).Render(controlsText)
 
-	menuBlock := lipgloss.JoinVertical(lipgloss.Center, asciiArt, title, menuBox, controls)
-	centeredMenu := lipgloss.NewStyle().Width(w).Height(h).Align(lipgloss.Center, lipgloss.Center).Render(menuBlock)
-	return centeredMenu
+	if m.title == "Main Menu" {
+		menuBlock := lipgloss.JoinVertical(lipgloss.Center, asciiArt, title, menuBox, controls)
+		centeredMenu := lipgloss.NewStyle().Width(w).Height(h).Align(lipgloss.Center, lipgloss.Center).Render(menuBlock)
+		return centeredMenu
+	} else if title != "" {
+		menuBlock := lipgloss.JoinVertical(lipgloss.Center, title, menuBox, controls)
+		centeredMenu := lipgloss.NewStyle().Width(w).Height(h).Align(lipgloss.Center, lipgloss.Center).Render(menuBlock)
+		return centeredMenu
+	} else {
+		menuBlock := lipgloss.JoinVertical(lipgloss.Center, menuBox, controls)
+		centeredMenu := lipgloss.NewStyle().Width(w).Height(h).Align(lipgloss.Center, lipgloss.Center).Render(menuBlock)
+		return centeredMenu
+	}
 }
 
 // Add missing methods and functions for ChatModel
@@ -1376,10 +1371,16 @@ func GUIMenuChats() error {
 
 			// 3. Prompt selection
 			prompts, err := loadPrompts()
-			if err != nil || len(prompts) == 0 {
+			if err != nil {
+				// Show error modal and return
+				ShowErrorModal(fmt.Sprintf("Error loading prompts: %v", err))
+				return err
+			}
+			if len(prompts) == 0 {
 				// Try to initialize default prompts if missing
 				prompts, err = initializeDefaultPrompts()
 				if err != nil || len(prompts) == 0 {
+					ShowErrorModal("No prompts available and failed to initialize defaults.")
 					return fmt.Errorf("no prompts available")
 				}
 			}
@@ -1807,21 +1808,86 @@ func GUIMenuAPIKey() error {
 			var names []string
 			for _, k := range config.Keys {
 				name := k.Title
-				if k.Title == config.ActiveKey {
+				if k.Active {
 					name += " (active)"
 				}
 				names = append(names, name)
 			}
 			_, _ = selectFromList("API Keys", names)
 		case 1: // Add API Key
-			reader := bufio.NewReader(os.Stdin)
-			fmt.Print("API Key title: ")
-			title, _ := reader.ReadString('\n')
-			title = strings.TrimSpace(title)
-			fmt.Print("API Key: ")
-			key, _ := reader.ReadString('\n')
-			key = strings.TrimSpace(key)
-			if err := addAPIKey(title, key); err != nil {
+			// Prompt for API Key Title
+			titleModal := InputBoxModal{
+				Prompt: "Enter API Key title:",
+				Value:  "",
+				Cursor: 0,
+				Width:  80,
+				Height: 24,
+			}
+			p := tea.NewProgram(titleModal, tea.WithAltScreen())
+			finalTitle, err := p.Run()
+			if err != nil {
+				return err
+			}
+			titleResult := finalTitle.(InputBoxModal)
+			if titleResult.Quitting {
+				return ErrMenuBack
+			}
+			title := strings.TrimSpace(titleResult.Value)
+			if title == "" {
+				title = "Default"
+			}
+
+			// Prompt for API Key (with clipboard fallback)
+			keyModal := InputBoxModal{
+				Prompt: "Enter your API key (leave blank to read from clipboard):",
+				Value:  "",
+				Cursor: 0,
+				Width:  80,
+				Height: 24,
+			}
+			p = tea.NewProgram(keyModal, tea.WithAltScreen())
+			finalKey, err := p.Run()
+			if err != nil {
+				return err
+			}
+			keyResult := finalKey.(InputBoxModal)
+			if keyResult.Quitting {
+				return ErrMenuBack
+			}
+			key := strings.TrimSpace(keyResult.Value)
+			if key == "" {
+				return fmt.Errorf("API key cannot be empty")
+			}
+
+			// Prompt for API Key URL
+			urlModal := InputBoxModal{
+				Prompt: "Enter the URL for this API key (leave blank to read from clipboard or use OpenRouter default):",
+				Value:  "",
+				Cursor: 0,
+				Width:  80,
+				Height: 24,
+			}
+			p = tea.NewProgram(urlModal, tea.WithAltScreen())
+			finalURL, err := p.Run()
+			if err != nil {
+				return err
+			}
+			urlResult := finalURL.(InputBoxModal)
+			if urlResult.Quitting {
+				return ErrMenuBack
+			}
+			url := strings.TrimSpace(urlResult.Value)
+			if url == "" {
+				clipText, err := clipboard.ReadAll()
+				if err == nil {
+					url = strings.TrimSpace(clipText)
+				}
+				if url == "" {
+					url = "https://openrouter.ai/api/v1/chat/completions"
+				}
+			}
+
+			if err := addAPIKey(title, key, url); err != nil {
 				return err
 			}
 		case 2: // Remove API Key
@@ -1855,8 +1921,7 @@ func GUIMenuAPIKey() error {
 			if err != nil || idx < 0 || idx >= len(config.Keys) {
 				continue
 			}
-			config.ActiveKey = config.Keys[idx].Title
-			if err := saveAPIKeys(config); err != nil {
+			if err := setActiveAPIKey(config.Keys[idx].Title); err != nil {
 				return err
 			}
 		case 4: // Back
@@ -1864,6 +1929,26 @@ func GUIMenuAPIKey() error {
 		}
 	}
 }
+
+// Add this before GUIShowHelp:
+type informationModalModel struct {
+	InformationModal
+}
+
+func (m informationModalModel) Init() tea.Cmd { return nil }
+func (m informationModalModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case "ctrl+c", "ctrl+q", "enter":
+			return m, tea.Quit
+		case "esc":
+			m.InformationModal.Quitting = true
+			return m, tea.Quit
+		}
+	}
+	return m, nil
+}
+func (m informationModalModel) View() string { return m.InformationModal.View() }
 
 func GUIShowHelp() error {
 	helpMenuOptions := []string{"Show Controls", "Show About", "Back"}
@@ -1884,15 +1969,41 @@ func GUIShowHelp() error {
 		menuModel := finalModel.(MenuModel)
 		switch menuModel.selected {
 		case 0: // Show Controls
-			fmt.Println("\nControls Cheat Sheet:\n")
-			fmt.Println("| Menu/General         | Chat Window           | Vim-style      |\n|---------------------|----------------------|---------------|")
-			fmt.Println("| ↑↓      Navigate    | Enter   Send message | :g  AI Title  |\n| Enter   Select      | Ctrl+S Stop request  | :t \"Title\"    |\n| Esc     Back        | Ctrl+C Quit          | :f  Favorite  |\n| Ctrl+C  Quit        | ↑↓      Scroll msgs  | :q  Quit      |\n|                     | PgUp/Dn Scroll page  |               |\n|                     | Home/End Top/Bottom  |               |\n|                     |                      |               |\n")
-			fmt.Println("Press Enter to continue...")
-			bufio.NewReader(os.Stdin).ReadBytes('\n')
+			helpContent := `
+| Menu/General  | Chat Window        | Vim-style     |
+|---------------|--------------------|---------------|
+| Up/Down Nav   | Enter  Send msg    | :g  AI Title  |
+| Enter  Select | Ctrl+S Stop req    | :t "Title"    |
+| Esc    Back   | Ctrl+C Quit        | :f  Favorite  |
+| Ctrl+C Quit   | Up/Down Scroll msg | :q  Quit      |
+|               | PgUp/Dn Scroll pg  |               |
+|               | Home/End Top/Bottom|               |
+|               |                    |               |
+(Press Enter or Esc to close)`
+			infoModal := InformationModal{
+				Title:   "Controls Cheat Sheet",
+				Content: helpContent,
+				Width:   80,
+				Height:  24,
+			}
+			modalProg := tea.NewProgram(informationModalModel{infoModal}, tea.WithAltScreen())
+			finalModal, _ := modalProg.Run()
+			if m, ok := finalModal.(informationModalModel); ok && m.InformationModal.Quitting {
+				return ErrMenuBack
+			}
 		case 1: // Show About
-			fmt.Println("\nGo AI CLI - Terminal AI Chat\nBuilt with Go, Bubble Tea, Lipgloss\nhttps://github.com/aculd/go-ai-cli\n")
-			fmt.Println("Press Enter to continue...")
-			bufio.NewReader(os.Stdin).ReadBytes('\n')
+			aboutContent := `Go AI CLI - Terminal AI Chat\nBuilt with Go, Bubble Tea, Lipgloss\nhttps://github.com/aculd/go-ai-cli\n\n(Press Enter or Esc to close)`
+			aboutModal := InformationModal{
+				Title:   "About",
+				Content: aboutContent,
+				Width:   80,
+				Height:  24,
+			}
+			modalProg := tea.NewProgram(informationModalModel{aboutModal}, tea.WithAltScreen())
+			finalModal, _ := modalProg.Run()
+			if m, ok := finalModal.(informationModalModel); ok && m.InformationModal.Quitting {
+				return ErrMenuBack
+			}
 		case 2: // Back
 			return ErrMenuBack
 		}
@@ -1915,7 +2026,19 @@ type aiTitleMsg struct {
 	title string
 }
 
-func parseMarkdown(content string) string {
+// parseText parses markdown and special characters for display in the UI
+func parseText(content string) string {
+	// Basic markdown to plain text: remove **, __, *, _, ``, etc.
+	// Preserve newlines and code blocks
+	// (For more advanced markdown, use a library, but keep it simple here)
+	content = strings.ReplaceAll(content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
+	// Remove bold/italic markers
+	re := regexp.MustCompile(`([*_]{1,2}|` + "`" + `)`)
+	content = re.ReplaceAllString(content, "")
+	// Replace multiple newlines with a single newline
+	reNL := regexp.MustCompile(`\n{3,}`)
+	content = reNL.ReplaceAllString(content, "\n\n")
 	return content
 }
 
@@ -2077,10 +2200,16 @@ func GUICustomChatFlow() error {
 
 	// 3. Prompt selection
 	prompts, err := loadPrompts()
-	if err != nil || len(prompts) == 0 {
+	if err != nil {
+		// Show error modal and return
+		ShowErrorModal(fmt.Sprintf("Error loading prompts: %v", err))
+		return err
+	}
+	if len(prompts) == 0 {
 		// Try to initialize default prompts if missing
 		prompts, err = initializeDefaultPrompts()
 		if err != nil || len(prompts) == 0 {
+			ShowErrorModal("No prompts available and failed to initialize defaults.")
 			return fmt.Errorf("no prompts available")
 		}
 	}
@@ -2155,7 +2284,7 @@ func saveDefaultModel(modelName string) error {
 	return os.WriteFile(path, newData, 0644)
 }
 
-// RunGUIMainMenu launches the Bubble Tea GUI main menu and routes to submenus
+// Restore the main menu entry point for the GUI
 func RunGUIMainMenu() error {
 	var width, height int
 	width, height = 0, 0
@@ -2228,4 +2357,111 @@ func RunGUIMainMenu() error {
 			}
 		}
 	}
+}
+
+// ShowErrorModal displays an error message in a blocking modal dialog
+func ShowErrorModal(message string) {
+	model := informationModalModel{
+		InformationModal: InformationModal{
+			Title:   "Error",
+			Content: message,
+			Width:   60,
+			Height:  8,
+		},
+	}
+	p := tea.NewProgram(model, tea.WithAltScreen())
+	_, _ = p.Run()
+}
+
+// Helper to compute the rendered height (in lines) of a message, including wrapping, label, and bubble padding
+func (m *ChatModel) getMessageRenderedHeight(msg Message) int {
+	parsedContent := parseText(msg.Content)
+	wrappedContent := wrapText(parsedContent, m.width-24)
+	lines := strings.Split(wrappedContent, "\n")
+	bubblePadding := 2  // Padding(1,3) means 1 top, 1 bottom
+	labelLines := 1     // Label line
+	marginBottom := 1   // Margin(0,0,1,0) or Margin(0,10,1,0)
+	messageSpacing := 2 // \n\n between messages in View method
+	return len(lines) + bubblePadding + labelLines + marginBottom + messageSpacing
+}
+
+// Helper to calculate total pages and clamp currentPage, using actual rendered heights
+func (m *ChatModel) updatePagination() {
+	visibleMessages := m.getVisibleMessages()
+	// Use the same height calculation as the View method
+	headerHeight := 1
+	statusHeight := 1
+	inputHeight := 3
+	chatBoxHeight := m.height - headerHeight - statusHeight - inputHeight - 2 // -2 for spacing
+	if chatBoxHeight < 1 {
+		chatBoxHeight = 1
+	}
+	m.pageStartIndices = []int{}
+	if len(visibleMessages) == 0 {
+		m.totalPages = 1
+		m.currentPage = 0
+		m.pageStartIndices = []int{0}
+		return
+	}
+	// Use the same bubble width as in View
+	bubbleWidth := m.width / 2
+	if bubbleWidth < 10 {
+		bubbleWidth = 10
+	}
+	pageStart := 0
+	for pageStart < len(visibleMessages) {
+		m.pageStartIndices = append(m.pageStartIndices, pageStart)
+		linesUsed := 0
+		idx := pageStart
+		for idx < len(visibleMessages) {
+			msg := visibleMessages[idx]
+			parsedContent := parseText(msg.Content)
+			wrappedContent := wrapText(parsedContent, bubbleWidth-6) // -6 for bubble padding
+			lines := strings.Split(wrappedContent, "\n")
+			bubblePadding := 2  // Padding(1,3) means 1 top, 1 bottom
+			labelLines := 1     // Label line
+			marginBottom := 1   // Margin(0,0,1,0) or Margin(0,10,1,0)
+			messageSpacing := 2 // \n\n between messages in View method
+			height := len(lines) + bubblePadding + labelLines + marginBottom + messageSpacing
+			if idx > pageStart {
+				height -= 2 // Remove message spacing for subsequent messages
+			}
+			if linesUsed+height > chatBoxHeight {
+				if idx == pageStart {
+					// Message too tall, force it onto its own page
+					idx++
+				}
+				break
+			}
+			linesUsed += height
+			idx++
+		}
+		pageStart = idx
+	}
+	m.totalPages = len(m.pageStartIndices)
+	if m.currentPage > m.totalPages-1 {
+		m.currentPage = m.totalPages - 1
+	}
+	if m.currentPage < 0 {
+		m.currentPage = 0
+	}
+}
+
+// Helper to get messages for the current page, using accurate page indices
+func (m *ChatModel) getPageMessages() []Message {
+	visibleMessages := m.getVisibleMessages()
+	if len(m.pageStartIndices) == 0 {
+		m.updatePagination()
+	}
+	if len(m.pageStartIndices) == 0 {
+		return []Message{}
+	}
+	start := m.pageStartIndices[m.currentPage]
+	var end int
+	if m.currentPage+1 < len(m.pageStartIndices) {
+		end = m.pageStartIndices[m.currentPage+1]
+	} else {
+		end = len(visibleMessages)
+	}
+	return visibleMessages[start:end]
 }

@@ -14,9 +14,11 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"os"
+	"strings"
+
+	"github.com/atotto/clipboard"
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 func main() {
@@ -29,13 +31,114 @@ func main() {
 		return
 	}
 
-	reader := bufio.NewReader(os.Stdin)
+	var err error
 
-	// Check API key on startup
-	if _, err := readAPIKey(); err != nil {
-		fmt.Println("No API key found.")
-		if err := promptAndSaveAPIKey(reader); err != nil {
-			handleError(err, "initial API key setup")
+	// Try to get active API key and URL, catch any error and enter onboarding flow
+	for {
+		_, _, err = getActiveAPIKeyAndURL()
+		if err == nil {
+			break // Valid key found, proceed
+		}
+
+		// Show information modal (Bubble Tea GUI)
+		infoModal := informationModalModel{
+			InformationModal: InformationModal{
+				Title:   "API Key Required",
+				Content: "You need to set a key before proceeding.\nPress enter to continue.",
+				Width:   60,
+				Height:  8,
+			},
+		}
+		p := tea.NewProgram(infoModal, tea.WithAltScreen())
+		_, _ = p.Run()
+
+		// Prompt for API Key Title
+		titleModal := InputBoxModal{
+			Prompt: "Enter API Key title:",
+			Value:  "",
+			Cursor: 0,
+			Width:  80,
+			Height: 24,
+		}
+		p = tea.NewProgram(titleModal, tea.WithAltScreen())
+		finalTitle, err := p.Run()
+		if err != nil {
+			handleError(err, "prompt for API key title")
+			return
+		}
+		titleResult := finalTitle.(InputBoxModal)
+		title := strings.TrimSpace(titleResult.Value)
+		if title == "" {
+			title = "Default"
+		}
+
+		// Prompt for API Key URL
+		urlModal := InputBoxModal{
+			Prompt: "Enter the URL for this API key (leave blank to read from clipboard or use OpenRouter default):",
+			Value:  "",
+			Cursor: 0,
+			Width:  80,
+			Height: 24,
+		}
+		p = tea.NewProgram(urlModal, tea.WithAltScreen())
+		finalURL, err := p.Run()
+		if err != nil {
+			handleError(err, "prompt for API key url")
+			return
+		}
+		urlResult := finalURL.(InputBoxModal)
+		url := strings.TrimSpace(urlResult.Value)
+		if url == "" {
+			clipText, err := clipboard.ReadAll()
+			if err == nil {
+				url = strings.TrimSpace(clipText)
+			}
+			if url == "" {
+				url = "https://openrouter.ai/api/v1/chat/completions"
+			}
+		}
+
+		// Prompt for API Key (with clipboard fallback)
+		keyModal := InputBoxModal{
+			Prompt: "Enter your API key (leave blank to read from clipboard):",
+			Value:  "",
+			Cursor: 0,
+			Width:  80,
+			Height: 24,
+		}
+		p = tea.NewProgram(keyModal, tea.WithAltScreen())
+		finalKey, err := p.Run()
+		if err != nil {
+			handleError(err, "prompt for API key value")
+			return
+		}
+		keyResult := finalKey.(InputBoxModal)
+		key := strings.TrimSpace(keyResult.Value)
+		if key == "" {
+			clipText, err := clipboard.ReadAll()
+			if err == nil {
+				key = strings.TrimSpace(clipText)
+			}
+		}
+		if key == "" {
+			ShowErrorModal("API key cannot be empty.")
+			continue // Loop again
+		}
+
+		// Add as active key
+		config, err := loadAPIKeys()
+		if err != nil {
+			handleError(err, "load API keys for save")
+			return
+		}
+		newKey := APIKey{Title: title, Key: key, URL: url, Active: true}
+		// Set all others inactive
+		for i := range config.Keys {
+			config.Keys[i].Active = false
+		}
+		config.Keys = append(config.Keys, newKey)
+		if err := saveAPIKeys(config); err != nil {
+			handleError(err, "save API key config")
 			return
 		}
 	}

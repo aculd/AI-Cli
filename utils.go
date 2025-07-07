@@ -21,17 +21,18 @@ var (
 )
 
 // APIKey represents a single API key with a title
-// Fields: Title (string), Key (string)
+// Fields: Title (string), Key (string), URL (string), Active (bool)
 type APIKey struct {
-	Title string `json:"title"`
-	Key   string `json:"key"`
+	Title  string `json:"title"`
+	Key    string `json:"key"`
+	URL    string `json:"url"`
+	Active bool   `json:"active"`
 }
 
 // APIKeysConfig represents the configuration for multiple API keys
-// Fields: Keys ([]APIKey), ActiveKey (string, optional)
+// Fields: Keys ([]APIKey)
 type APIKeysConfig struct {
-	Keys      []APIKey `json:"keys"`
-	ActiveKey string   `json:"active_key,omitempty"` // Title of the active key
+	Keys []APIKey `json:"keys"`
 }
 
 func prependSystemPrompt(messages []Message, systemPrompt Message) []Message {
@@ -101,30 +102,41 @@ func saveAPIKeys(config *APIKeysConfig) error {
 func getActiveAPIKey() (string, error) {
 	config, err := loadAPIKeys()
 	if err == nil && len(config.Keys) > 0 {
-		// If no active key is set, use the first one
-		if config.ActiveKey == "" {
-			config.ActiveKey = config.Keys[0].Title
-			if err := saveAPIKeys(config); err != nil {
-				return "", err
-			}
-			return config.Keys[0].Key, nil
-		}
-		// Find the active key
 		for _, key := range config.Keys {
-			if key.Title == config.ActiveKey {
+			if key.Active {
 				return key.Key, nil
 			}
 		}
-		// If active key not found, use the first one
-		config.ActiveKey = config.Keys[0].Title
-		if err := saveAPIKeys(config); err != nil {
-			return "", err
+		return "", &AppError{
+			Op:      "get active API key",
+			Err:     fmt.Errorf("no active API key found"),
+			Message: "No active API key found. Please set one as active.",
 		}
-		return config.Keys[0].Key, nil
 	}
-
 	return "", &AppError{
 		Op:      "get active API key",
+		Err:     fmt.Errorf("no API keys found"),
+		Message: "No API keys found. Please add an API key first",
+	}
+}
+
+// getActiveAPIKeyAndURL returns the currently active API key and its URL from the multi-key system, or an error if not found.
+func getActiveAPIKeyAndURL() (string, string, error) {
+	config, err := loadAPIKeys()
+	if err == nil && len(config.Keys) > 0 {
+		for _, key := range config.Keys {
+			if key.Active {
+				return key.Key, key.URL, nil
+			}
+		}
+		return "", "", &AppError{
+			Op:      "get active API key and url",
+			Err:     fmt.Errorf("no active API key found"),
+			Message: "No active API key found. Please set one as active.",
+		}
+	}
+	return "", "", &AppError{
+		Op:      "get active API key and url",
 		Err:     fmt.Errorf("no API keys found"),
 		Message: "No API keys found. Please add an API key first",
 	}
@@ -230,7 +242,22 @@ func promptAndSaveAPIKey(reader *bufio.Reader) error {
 		}
 	}
 
-	if err := addAPIKey(title, key); err != nil {
+	fmt.Print("Enter the URL for this API key: ")
+	url, err := reader.ReadString('\n')
+	if err != nil {
+		return &AppError{
+			Op:      "read API key URL",
+			Err:     err,
+			Message: "failed to read API key URL from input",
+		}
+	}
+
+	url = strings.TrimSpace(url)
+	if url == "" {
+		url = "https://openrouter.ai/api/v1/chat/completions"
+	}
+
+	if err := addAPIKey(title, key, url); err != nil {
 		return err
 	}
 
@@ -238,16 +265,14 @@ func promptAndSaveAPIKey(reader *bufio.Reader) error {
 	return nil
 }
 
-// addAPIKey adds a new API key with the given title and key, and sets as active if first key.
-// Params: title (string), key (string)
+// addAPIKey adds a new API key with the given title, key, and URL, and sets as active if first key.
+// Params: title (string), key (string), url (string)
 // Returns: error if the title exists or saving fails.
-func addAPIKey(title, key string) error {
+func addAPIKey(title, key, url string) error {
 	config, err := loadAPIKeys()
 	if err != nil {
 		return err
 	}
-
-	// Check if title already exists
 	for _, existingKey := range config.Keys {
 		if existingKey.Title == title {
 			return &AppError{
@@ -257,14 +282,36 @@ func addAPIKey(title, key string) error {
 			}
 		}
 	}
-
-	// Add new key
-	config.Keys = append(config.Keys, APIKey{Title: title, Key: key})
-
-	// Set as active if it's the first key
-	if len(config.Keys) == 1 {
-		config.ActiveKey = title
+	active := false
+	if len(config.Keys) == 0 {
+		active = true
 	}
-
+	config.Keys = append(config.Keys, APIKey{Title: title, Key: key, URL: url, Active: active})
 	return saveAPIKeys(config)
+}
+
+// setKeyActiveByTitle sets the given API key title as active and all others as inactive, and saves the config
+func setKeyActiveByTitle(title string) error {
+	config, err := loadAPIKeys()
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range config.Keys {
+		if config.Keys[i].Title == title {
+			config.Keys[i].Active = true
+			found = true
+		} else {
+			config.Keys[i].Active = false
+		}
+	}
+	if !found {
+		return fmt.Errorf("API key with title '%s' not found", title)
+	}
+	return saveAPIKeys(config)
+}
+
+// setActiveAPIKey sets the given API key title as the active key in api_keys.json
+func setActiveAPIKey(title string) error {
+	return setKeyActiveByTitle(title)
 }

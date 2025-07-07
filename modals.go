@@ -1,6 +1,9 @@
 package main
 
 import (
+	"strings"
+
+	"github.com/atotto/clipboard"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -64,18 +67,31 @@ func (m ConfirmationModal) View() string {
 	return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, box)
 }
 
-// HelpModal is a reusable modal for help/about screens
+// InformationModal is a reusable modal for help/about/info screens
 // No background, white text, blue headings, white box outlines
-type HelpModal struct {
-	Title   string
-	Content string
-	Width   int
-	Height  int
+type InformationModal struct {
+	Title    string
+	Content  string
+	Width    int
+	Height   int
+	Quitting bool
 }
 
-func (m HelpModal) View() string {
+func (m InformationModal) View() string {
 	title := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("39")).Render(m.Title)
-	content := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render(m.Content)
+	lines := strings.Split(parseText(m.Content), "\n")
+	var renderedLines []string
+	mono := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).SetString("").Render
+	normal := lipgloss.NewStyle().Foreground(lipgloss.Color("252")).Render
+	for _, line := range lines {
+		trim := strings.TrimSpace(line)
+		if strings.HasPrefix(trim, "|") || strings.Contains(trim, "---") {
+			renderedLines = append(renderedLines, mono(line))
+		} else {
+			renderedLines = append(renderedLines, normal(line))
+		}
+	}
+	content := strings.Join(renderedLines, "\n")
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("39")).
@@ -91,7 +107,7 @@ func (m InputBoxModal) Init() tea.Cmd { return nil }
 func (m InputBoxModal) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if keyMsg, ok := msg.(tea.KeyMsg); ok {
 		switch keyMsg.String() {
-		case "ctrl+c", "esc":
+		case "ctrl+c", "ctrl+q", "esc":
 			m.Quitting = true
 			return m, tea.Quit
 		case "enter":
@@ -109,11 +125,49 @@ func (m InputBoxModal) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.Cursor < len(m.Value) {
 				m.Cursor++
 			}
+		case "ctrl+v":
+			paste, err := clipboard.ReadAll()
+			if err == nil && paste != "" {
+				m.Value = m.Value[:m.Cursor] + paste + m.Value[m.Cursor:]
+				m.Cursor += len(paste)
+			}
 		default:
 			if len(keyMsg.String()) == 1 && keyMsg.Type == tea.KeyRunes {
 				m.Value = m.Value[:m.Cursor] + keyMsg.String() + m.Value[m.Cursor:]
 				m.Cursor++
 			}
+		}
+	}
+	return m, nil
+}
+
+// ErrorModal is a reusable modal for displaying errors
+type ErrorModal struct {
+	Message  string
+	Width    int
+	Height   int
+	Quitting bool
+}
+
+func (m ErrorModal) View() string {
+	errorStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("15")). // white border
+		Padding(1, 2).
+		Foreground(lipgloss.Color("196")). // red text
+		Width(m.Width - 10)
+	box := errorStyle.Render(m.Message + "\n\nESC or Enter to close")
+	return lipgloss.Place(m.Width, m.Height, lipgloss.Center, lipgloss.Center, box)
+}
+
+func (m ErrorModal) Init() tea.Cmd { return nil }
+
+func (m ErrorModal) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if keyMsg, ok := msg.(tea.KeyMsg); ok {
+		switch keyMsg.String() {
+		case "ctrl+c", "esc", "enter":
+			m.Quitting = true
+			return m, tea.Quit
 		}
 	}
 	return m, nil
