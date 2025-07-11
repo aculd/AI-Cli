@@ -1,0 +1,34 @@
+{
+  "keys": [
+    {
+      "title": "Another Key",
+      "key": "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",
+      "url": "https://openrouter.ai/api/v1/chat/completions",
+      "active": false
+    },
+    {
+      "title": "requesty",
+      "key": "sk-Sd2/CuTvTwGohIvuZO6KY92wD/R3YvWhaDmXkK2i8UznnvhPB4DynbGyYS42jGDYbxtZTRjVKMSyBARf1xI6P1P5e0U+0wA9XaymuV+RSA4=",
+      "url": "https://openrouter.ai/api/v1/chat/completions",
+      "active": false
+    },
+    {
+      "title": "requesty-o1",
+      "key": "sk-Sd2/CuTvTwGohIvuZO6KY92wD/R3YvWhaDmXkK2i8UznnvhPB4DynbGyYS42jGDYbxtZTRjVKMSyBARf1xI6P1P5e0U+0wA9XaymuV+RSA4=",
+      "url": "https://router.requesty.ai/v1",
+      "active": false
+    },
+    {
+      "title": "Another Key",
+      "key": "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",
+      "url": "./https://openrouter.ai/api/v1/chat/completions",
+      "active": false
+    },
+    {
+      "title": "APIKEY",
+      "key": "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",
+      "url": "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",
+      "active": true
+    }
+  ]
+}

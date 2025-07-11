@@ -1,0 +1,9 @@
+{
+  "max_size": 100,
+  "ttl": 300000000000,
+  "enable_stats": true,
+  "auto_save": true,
+  "save_interval": 60000000000,
+  "file_watch": true,
+  "compression": false
+}

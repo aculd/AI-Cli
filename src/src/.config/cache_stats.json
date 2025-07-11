@@ -1,0 +1,36 @@
+{
+  "status": "healthy",
+  "last_check": "2025-07-11T09:17:18.4239364+10:00",
+  "statistics": {
+    "keys": {
+      "hits": 0,
+      "misses": 0,
+      "evictions": 0,
+      "size": 0,
+      "max_size": 100,
+      "last_updated": "0001-01-01T00:00:00Z"
+    },
+    "models": {
+      "hits": 0,
+      "misses": 0,
+      "evictions": 0,
+      "size": 0,
+      "max_size": 100,
+      "last_updated": "0001-01-01T00:00:00Z"
+    },
+    "prompts": {
+      "hits": 0,
+      "misses": 0,
+      "evictions": 0,
+      "size": 0,
+      "max_size": 100,
+      "last_updated": "0001-01-01T00:00:00Z"
+    }
+  },
+  "performance": {
+    "hit_rate": 0,
+    "miss_rate": 0,
+    "eviction_rate": 0,
+    "average_load_time": 0
+  }
+}

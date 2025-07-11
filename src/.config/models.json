@@ -1,0 +1,20 @@
+{
+  "models": [
+    {
+      "name": "deepseek/deepseek-chat-v3-0324:free",
+      "is_default": true
+    },
+    {
+      "name": "openai/gpt-4",
+      "is_default": false
+    },
+    {
+      "name": "meta-llama/llama-3-8b-instruct",
+      "is_default": false
+    },
+    {
+      "name": "openai/o1-mini",
+      "is_default": false
+    }
+  ]
+}
