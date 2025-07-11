@@ -654,66 +654,81 @@ func (m *GUIAppModel) renderContent(width, height int) string {
 	return m.styles.contentStyle.Width(width).Height(height).Render(content)
 }
 
-// renderMenuView renders a menu view
-func (m *GUIAppModel) renderMenuView(menuView *types.MenuViewState, width, height int) string {
-	if entries := types.Menus[menuView.Type].Entries; len(entries) > 0 {
-		// Menu box style: min width 300px, min height 400px
-		boxStyle := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color("245")).
-			Padding(1, 4).
-			Width(max(300, width)).
-			Height(max(400, height)).
-			Align(lipgloss.Center)
+// AsciiArtView: renders fixed-width ASCII art
+func asciiArtView() string {
+	return `  
+  █████╗ ██╗ ██████╗██╗  ██╗ █████╗ ████████╗
+ ██╔══██╗██║██╔════╝██║  ██║██╔══██╗╚══██╔══╝
+ ███████║██║██║     ███████║███████║   ██║   
+ ██╔══██║██║██║     ██╔══██║██╔══██║   ██║   
+ ██║  ██║██║╚██████╗██║  ██║██║  ██║   ██║   
+ ╚═╝  ╚═╝╚═╝ ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝   ╚═╝   `
+}
 
-		// Menu heading inside the box, centered
-		heading := lipgloss.NewStyle().Width(max(300, width)).Align(lipgloss.Center).Render(m.getMenuTitle(menuView.Type))
+// MenuBoxView: renders menu heading and items
+func menuBoxView(m *GUIAppModel, menuView *types.MenuViewState, width, height int) string {
+	boxStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("245")).
+		Padding(1, 4).
+		Width(max(300, width)).
+		Height(max(400, height)).
+		Align(lipgloss.Center)
 
-		// Add menu options
-		var menuLines []string
-		for i, option := range entries {
-			line := option.Text
-			if option.Description != "" {
-				line += " - " + option.Description
-			}
+	heading := lipgloss.NewStyle().Width(max(300, width)).Align(lipgloss.Center).Render(m.getMenuTitle(menuView.Type))
 
-			var itemStyle lipgloss.Style
-			if option.Description != "" {
-				itemStyle = lipgloss.NewStyle().Width(max(300, width)).Align(lipgloss.Left)
-			} else {
-				itemStyle = lipgloss.NewStyle().Width(max(300, width)).Align(lipgloss.Center)
-			}
-
-			if i == menuView.Selected {
-				line = m.styles.selectedStyle.Render(line)
-			} else {
-				line = m.styles.textStyle.Render(line)
-			}
-
-			if option.Disabled {
-				line = m.styles.disabledStyle.Render(line)
-			}
-
-			menuLines = append(menuLines, itemStyle.Render(line))
+	var menuLines []string
+	for i, option := range types.Menus[menuView.Type].Entries {
+		line := option.Text
+		if option.Description != "" {
+			line += " - " + option.Description
 		}
-
-		// Compose menu box: heading + menu items
-		menuBox := boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, heading, "", lipgloss.JoinVertical(lipgloss.Left, menuLines...)))
-
-		// Control info text, centered below the menu box
-		var controlInfo string
-		if meta, exists := types.MenuMetas[menuView.Type]; exists {
-			if ci, exists := types.ControlInfoMap[meta.ControlInfoType]; exists {
-				for _, controlLine := range ci.Lines {
-					controlInfo += m.styles.helpStyle.Width(max(300, width)).Align(lipgloss.Center).Render(controlLine) + "\n"
-				}
-			}
+		var itemStyle lipgloss.Style
+		if option.Description != "" {
+			itemStyle = lipgloss.NewStyle().Width(max(300, width)).Align(lipgloss.Left)
+		} else {
+			itemStyle = lipgloss.NewStyle().Width(max(300, width)).Align(lipgloss.Center)
 		}
-
-		return lipgloss.JoinVertical(lipgloss.Center, menuBox, controlInfo)
+		if i == menuView.Selected {
+			line = m.styles.selectedStyle.Render(line)
+		} else {
+			line = m.styles.textStyle.Render(line)
+		}
+		if option.Disabled {
+			line = m.styles.disabledStyle.Render(line)
+		}
+		menuLines = append(menuLines, itemStyle.Render(line))
 	}
+	return boxStyle.Render(lipgloss.JoinVertical(lipgloss.Left, heading, "", lipgloss.JoinVertical(lipgloss.Left, menuLines...)))
+}
 
-	return m.styles.errorStyle.Render("Invalid menu type")
+// ControlInfoView: renders control info, left-aligned, matches menu box width
+func controlInfoView(m *GUIAppModel, menuType types.MenuType, width int) string {
+	var controlInfo string
+	if meta, exists := types.MenuMetas[menuType]; exists {
+		if ci, exists := types.ControlInfoMap[meta.ControlInfoType]; exists {
+			for _, controlLine := range ci.Lines {
+				controlInfo += m.styles.helpStyle.Width(max(300, width)).Align(lipgloss.Left).Render(controlLine) + "\n"
+			}
+		}
+	}
+	return controlInfo
+}
+
+// Refactored renderMenuView to use the three components
+func (m *GUIAppModel) renderMenuView(menuView *types.MenuViewState, width, height int) string {
+	if len(types.Menus[menuView.Type].Entries) == 0 {
+		return m.styles.errorStyle.Render("Invalid menu type")
+	}
+	ascii := asciiArtView()
+	menuBox := menuBoxView(m, menuView, width, height)
+	controlInfo := controlInfoView(m, menuView.Type, width)
+	return lipgloss.JoinVertical(
+		lipgloss.Center,
+		lipgloss.PlaceHorizontal(width, lipgloss.Center, ascii),
+		lipgloss.PlaceHorizontal(width, lipgloss.Center, menuBox),
+		lipgloss.PlaceHorizontal(width, lipgloss.Left, controlInfo),
+	)
 }
 
 // renderChatView renders a chat view

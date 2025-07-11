@@ -10,11 +10,25 @@ aichat.exe
 .api_key
 openrouterkey.txt
 *.key
+.config/
+
+# Ignore all JSON files (config, cache, etc)
+*.json
 
 # User-specific files
 test.ps1
 build-script.ps1
 response.html
+
+# Documentation (ignore all markdown except README.md)
+*.md
+!README.md
+
+docs/*.md
+!README.md
+
+# Unused/old code
+legacy/
 
 # IDE and editor files
 .vscode/
